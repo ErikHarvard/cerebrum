@@ -1274,6 +1274,10 @@ try:
         arch = open(os.path.join(v, "2 AREAS/META/ARCHIVUM.md"), encoding="utf-8").read()
         check("ARCHIVUM renders the capture, the placement with the readers' why, and the retrieval with its passages",
               "capture" in arch and "same songs" in arch and "Songs.md" in arch and "answer-1.md" in arch and "Intake — 5 event(s)" in arch and "Retrieval — 1 event(s)" in arch)
+        AR.ledger("intake", event="ratify", plan="p.tsv", by="the keeper", undo="/x/undo-2.tsv", expect="", verify="GREEN", ops=[["mv", "a", "b"]])
+        AR.ledger("intake", event="correction", note="# INBOX/X.md", placed="3 RESOURCES/Songs.md", moved_to="2 AREAS/Beta.md", by="the keeper", why="belongs with its project")
+        REG.write(v, cfg); arch = open(os.path.join(v, "2 AREAS/META/ARCHIVUM.md"), encoding="utf-8").read()
+        check("a correction is rendered and reader accuracy is counted from ratified placements later moved", "correction" in arch and "1 placement(s) ratified, 1 later moved" in arch and "0/1 stood" in arch)
         check("… and the ruling, the dispute with both readers' reasons, the undo, and the most-retrieved list",
               "the keeper says A" in arch and "A → `3 RESOURCES/Songs.md` · B → `3 RESOURCES/Training.md`" in arch and "undo-1.tsv" in arch and "Most retrieved" in arch and "in 1 answer(s)" in arch)
         check("registry and archivum are fresh together, and the registry leaves the archivum out of what it counts",
