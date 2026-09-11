@@ -706,6 +706,17 @@ def effective(vault, cfg, recs, notes=None):
         elif rest:
             probs.append(f"{rel}: {len(rest)} line(s) not read — the first is L{rest[0]}"); ok = False
         if ok:
+            for r in {id(x): x for x in assign.values()}.values():
+                if r["op"] == "merge" and r.get("relation") == "≡" and r.get("dest"):
+                    d = r["dest"]
+                    if not os.path.isfile(os.path.join(vault, d)):
+                        probs.append(f"{r.get('_at', 'a record')}: {rel}: ≡ into a note that does not exist: {d}"); ok = False; continue
+                    have = {ln.strip() for ln in read_bytes(vault, d).decode("utf-8", "replace").splitlines() if ln.strip()}
+                    mine = data.decode("utf-8", "replace").splitlines()
+                    missing = [l for l, x in assign.items() if x is r and mine[l - 1].strip() and mine[l - 1].strip() not in have]
+                    if missing:
+                        probs.append(f"{r.get('_at', 'a record')}: {rel}: ≡ claimed, but L{missing[0]} is not in {d} — a variant is =, not ≡"); ok = False
+        if ok:
             eff[rel] = assign
     return eff, probs
 
@@ -816,12 +827,18 @@ def _spec(lines):
             runs.append([l, l])
     return ",".join(f"L{a}-L{b}" if a != b else f"L{a}" for a, b in runs)
 
+LEAVE = "(leave)"                        # a ≡-merged line goes nowhere: its destination already holds it
+
 def propose(vault, cfg, agreed, runs, today=None):
     """Turn agreed lines into a plan the mover can prove. A note acts only if every non-blank line of
     it is agreed; a new note is made only if no line meant for it is under dispute; nothing lands in a
     note under dispute. A note whose lines go to more than one place, or into a note that is not
     new, is archived whole first ('<name> — original (<date>)') and partitioned from there: every line
-    placed exactly once, the original kept. Returns (plan lines, report)."""
+    placed exactly once, the original kept. A `merge =` record gathers: the lines go into the note
+    that holds the same claims in other words, for the keeper to distil by hand. A `merge ≡` record
+    sends nothing: the destination already holds those very lines, so they are LEFT in the archived
+    original and the destination is not touched — appending them would make the duplicate the
+    reader found. Returns (plan lines, report)."""
     today = today or C.datetime.now().strftime("%Y-%m-%d")
     arch = list(cfg.get("para", C.PARA))[-1]
     exists = lambda p: os.path.lexists(os.path.join(vault, p))
@@ -842,7 +859,9 @@ def propose(vault, cfg, agreed, runs, today=None):
         blocked |= bad
     place = {}                                      # every line → its final note; a blank line follows its neighbour
     for rel in sorted(set(agreed) - blocked):
-        n, fd, last = len(data[rel].splitlines(keepends=True)), {l: final_dest(agreed[rel][l], rel) for l in nb[rel]}, None
+        n, last = len(data[rel].splitlines(keepends=True)), None
+        fd = {l: (LEAVE if agreed[rel][l]["op"] == "merge" and agreed[rel][l].get("relation") == "≡"
+                  else final_dest(agreed[rel][l], rel)) for l in nb[rel]}
         first = fd[nb[rel][0]] if nb[rel] else rel
         place[rel] = {}
         for l in range(1, n + 1):
@@ -862,7 +881,7 @@ def propose(vault, cfg, agreed, runs, today=None):
         if ds == {rel}:
             continue
         d = next(iter(ds))
-        if len(ds) == 1 and not exists(d) and contrib[d][0][0] == rel:
+        if len(ds) == 1 and d != LEAVE and not exists(d) and contrib[d][0][0] == rel:
             moved[rel] = d; continue
         stem, k = os.path.splitext(os.path.basename(rel))[0], 1
         arc = f"{arch}/{stem} — original ({today}).md"
@@ -880,8 +899,14 @@ def propose(vault, cfg, agreed, runs, today=None):
         mkdirs(arc); plan += [f"mv\t{rel}\t{arc}", f"partition\t{arc}\t{hashlib.sha256(data[rel]).hexdigest()}"]
     for rel, d in moved.items():
         mkdirs(d); plan.append(f"mv\t{rel}\t{d}")
+    for rel, arc in dissolved.items():
+        left = [l for l, d in place[rel].items() if d == LEAVE]
+        if left:
+            plan.append(f"leave\t{arc}\t{_spec(left)}")
     gathered = {}
     for d in order:
+        if d == LEAVE:
+            continue
         live, first = exists(d) and d not in dissolved and d not in moved, True
         for rel, ls in contrib[d]:
             if (rel == d and rel not in dissolved) or moved.get(rel) == d:

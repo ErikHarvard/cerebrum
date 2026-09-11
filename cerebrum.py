@@ -988,6 +988,17 @@ def undo_plan(vault, undo_path):
                 notes.append(f"could not restore {p} — recover it from the trash or the snapshot")
     return notes
 
+def snapshot_stale(snaps, state):
+    """§VII.1: a snapshot taken since the last pass must exist before a plan runs. Returns the
+    reason it may not run, or "" when a snapshot is newer than every undo map."""
+    snap = sorted(glob.glob(os.path.join(snaps, "vault-*.tar.gz")), key=os.path.getmtime)
+    if not snap:
+        return "no snapshot exists"
+    undo = sorted(glob.glob(os.path.join(state, "undo-*.tsv")), key=os.path.getmtime)
+    if undo and os.path.getmtime(undo[-1]) > os.path.getmtime(snap[-1]):
+        return f"the newest snapshot ({os.path.basename(snap[-1])}) is older than the last pass ({os.path.basename(undo[-1])})"
+    return ""
+
 def cmd_move(a):
     if not a.plan or not a.before:
         print("move: need --plan <plan.tsv> and --before <manifest.tsv>"); return 2
@@ -1023,6 +1034,9 @@ def cmd_move(a):
         print("move: refused. --apply needs --i-ratified (the keeper has ratified this plan)."); return 2
     if real and _obsidian_running():
         print("move: refused. Close Obsidian first — it rewrites files while open."); return 2
+    stale = snapshot_stale(SNAPS, STATE)
+    if real and stale:
+        print(f"move: refused. {stale} — the law's step 1: snapshot before any move (cerebrum.py snapshot)."); return 2
     pre_ok, pre = _verify(VAULT, before_rows, frozen_live=a.frozen_live)
     if not pre_ok:
         print("move: refused. The vault no longer matches the before-manifest:")

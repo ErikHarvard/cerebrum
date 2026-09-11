@@ -943,6 +943,55 @@ try:
 finally:
     shutil.rmtree(tmp16, ignore_errors=True)
 
+print("== merge: a copy or the same claims sends nothing — the source is archived, the destination untouched ==")
+tmp17 = tempfile.mkdtemp(prefix="cerebrum-merge-")
+try:
+    v, ocfg = organ_vault(tmp17)
+    base = [r for r in keep_all(v, ocfg) if r["note"] != "2 AREAS/Copy A.md"]
+    e = SEM.effective(v, ocfg, base + [rec(v, "2 AREAS/Copy A.md", "*", op="merge", dest="4 ARCHIVE/Copy B.md", relation="≡")])[0]
+    agreed, runs, _ = SEM.agree_detail(v, e, e)
+    plan = SEM.propose(v, ocfg, agreed, runs, today="2026-01-01")[0]
+    b_before = open(os.path.join(v, "4 ARCHIVE", "Copy B.md"), "rb").read()
+    ops = write_plan(os.path.join(tmp17, "p.tsv"), plan)
+    errs = C.simulate(v, ops, manifest(v))[0]
+    check("≡ into its twin: the copy is archived whole and its lines LEFT there; nothing is appended anywhere",
+          errs == [] and any(l.startswith("mv\t2 AREAS/Copy A.md\t4 ARCHIVE/Copy A — original") for l in plan)
+          and any(l.startswith("leave\t") for l in plan) and not any(l.startswith(("extend\t", "compose\t")) for l in plan))
+    ok, f, _ = C.apply_plan(v, ops, manifest(v), C._scratch_trash_fn(os.path.join(tmp17, "_t")), os.path.join(tmp17, "u.tsv"))
+    check("applied: the destination's bytes are exactly what they were",
+          ok and open(os.path.join(v, "4 ARCHIVE", "Copy B.md"), "rb").read() == b_before and not os.path.exists(os.path.join(v, "2 AREAS", "Copy A.md")))
+    v, ocfg = organ_vault(tempfile.mkdtemp(prefix="cerebrum-merge2-", dir=tmp17))
+    base = [r for r in keep_all(v, ocfg) if r["note"] != "3 RESOURCES/Songs.md"]
+    e = SEM.effective(v, ocfg, base + [rec(v, "3 RESOURCES/Songs.md", "P000"),
+                                        rec(v, "3 RESOURCES/Songs.md", "P001", op="merge", dest="3 RESOURCES/Training.md", relation="=")])[0]
+    agreed, runs, _ = SEM.agree_detail(v, e, e)
+    plan = SEM.propose(v, ocfg, agreed, runs, today="2026-01-01")[0]
+    t_before = open(os.path.join(v, "3 RESOURCES", "Training.md"), "rb").read()
+    ops = write_plan(os.path.join(tmp17, "q.tsv"), plan)
+    check("= for part of a note GATHERS: the kept part recomposed at its path, the merged part appended into the destination (the brief's γ)",
+          C.simulate(v, ops, manifest(v))[0] == [] and any(l.startswith("compose\t3 RESOURCES/Songs.md\t") for l in plan)
+          and any(l.startswith("extend\t3 RESOURCES/Training.md\t") for l in plan) and not any(l.startswith("leave\t") for l in plan))
+    probs = SEM.effective(v, ocfg, base + [rec(v, "3 RESOURCES/Songs.md", "*", op="merge", dest="3 RESOURCES/Training.md", relation="≡")])[1]
+    check("≡ claimed for text the destination does not hold is refused as a variant", any("≡ claimed" in p for p in probs))
+    probs = SEM.effective(v, ocfg, base + [rec(v, "3 RESOURCES/Songs.md", "*", op="merge", dest="3 RESOURCES/Nowhere.md", relation="≡")])[1]
+    check("≡ into a note that does not exist is refused", any("does not exist" in p for p in probs))
+finally:
+    shutil.rmtree(tmp17, ignore_errors=True)
+
+print("== the mover refuses a live run without a snapshot taken since the last pass (§VII.1) ==")
+tmp18 = tempfile.mkdtemp(prefix="cerebrum-snap-")
+try:
+    sn, st = os.path.join(tmp18, "snaps"), os.path.join(tmp18, "state"); os.makedirs(sn); os.makedirs(st)
+    check("no snapshot at all → refused", C.snapshot_stale(sn, st) != "")
+    open(os.path.join(sn, "vault-1.tar.gz"), "w").write("x"); os.utime(os.path.join(sn, "vault-1.tar.gz"), (1000, 1000))
+    check("a snapshot with no pass since → allowed", C.snapshot_stale(sn, st) == "")
+    open(os.path.join(st, "undo-2.tsv"), "w").write("x"); os.utime(os.path.join(st, "undo-2.tsv"), (2000, 2000))
+    check("a pass ran after the snapshot → refused", "older than the last pass" in C.snapshot_stale(sn, st))
+    open(os.path.join(sn, "vault-3.tar.gz"), "w").write("x"); os.utime(os.path.join(sn, "vault-3.tar.gz"), (3000, 3000))
+    check("a fresh snapshot after the pass → allowed", C.snapshot_stale(sn, st) == "")
+finally:
+    shutil.rmtree(tmp18, ignore_errors=True)
+
 print("== registry: a live note inside its archived original is not proposed for removal ==")
 s, root, cfg = K._scratch()
 try:
