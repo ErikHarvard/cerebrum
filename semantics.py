@@ -740,8 +740,6 @@ def dest_problem(d, cfg):
         return f"a destination must be a note (.md): {d}"
     if d.split("/")[0] not in list(cfg.get("para", C.PARA)):
         return f"a destination must be in a PARA home: {d}"
-    if d.count("/") > 2:
-        return f"deeper than category → container → note: {d}"
     return f"a destination inside the frozen register: {d}" if C.is_frozen(d) else ""
 
 def validate(r, sha, cfg):

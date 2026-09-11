@@ -336,16 +336,23 @@ def r_one_inbox(v):
                 out.append(f"a second {'inbox' if re.search('inbox', d, re.I) else 'archive'}: {p}")
     return out
 
-def _plant_deep_file(v):
-    d = os.path.join(v.root, v.para[2], "Container", "Deeper")
-    os.makedirs(d); open(os.path.join(d, "too deep.md"), "w").write("x\n")
+def _plant_notebook_of_one(v):
+    d = os.path.join(v.root, v.para[2], "Lonely"); os.makedirs(d); open(os.path.join(d, "only.md"), "w").write("x\n")
 
-@rule("III", "three levels, no deeper",
-      "category → container → note, and no further: a file deeper than that has no one standing", _plant_deep_file)
-def r_three_levels(v):
-    homes = v.para[1:]
-    return [f"deeper than category/container/note: {p}" for p in v.movable
-            if p.split("/")[0] in homes and len(p.split("/")) > 3]
+@rule("III", "no notebook of one",
+      "notebooks nest by subject as deep as meaning requires, and a notebook is a name for a whole — one that holds a "
+      "single thing is a name for nothing: the thing belongs one level up (the keeper's ruling, 2026-09-11)", _plant_notebook_of_one)
+def r_notebook_of_one(v):
+    out = []
+    for r, ds, fs in os.walk(v.root):
+        rel = os.path.relpath(r, v.root)
+        ds[:] = [d for d in ds if not v.is_frozen(os.path.normpath(os.path.join(rel, d)))]
+        if rel == "." or rel in v.para:
+            continue
+        kids = len(ds) + len([f for f in fs if not f.startswith(".")])
+        if kids == 1:
+            out.append(f"a notebook of one: {rel} — holds only {(ds or [f for f in fs if not f.startswith('.')])[0]}")
+    return out
 
 def _plant_empty_folder(v):
     os.makedirs(os.path.join(v.root, v.para[2], "Nothing here"))
@@ -498,7 +505,7 @@ def _scratch():
     open(os.path.join(v, "2 AREAS/META/LAW.md"), "w").write(
         "# Law\n\n**Where.** `2 AREAS/META/` — inside the folders, not above them.\n\n## VII. Rite\n\n| Operation | Does | Refused when |\n|---|---|---|\n"
         + ops + "\n\n## XV. Check\n\n| Law | At the vault | Rules |\n|---|---|---|\n| **All** | rules | " + rules + " |\n")
-    os.makedirs(os.path.join(v, "EXTRA")); open(os.path.join(v, "EXTRA/kept.md"), "w").write("kept\n")
+    os.makedirs(os.path.join(v, "EXTRA")); open(os.path.join(v, "EXTRA/kept.md"), "w").write("kept\n"); open(os.path.join(v, "EXTRA/also.md"), "w").write("also\n")
     open(os.path.join(v, "1 PROJECTS/Plan.md"), "w").write("see [[Idea]]\n")
     open(os.path.join(v, "3 RESOURCES/Idea.md"), "w").write("an idea\n")
     open(os.path.join(v, "FROZEN/organ.md"), "w").write("live\n")

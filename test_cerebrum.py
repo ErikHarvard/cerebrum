@@ -884,7 +884,7 @@ check("300 words of links make several windows, not one", len(SEM.windows(dense)
 print("== Law Revision I: six new rules, each red on its planted defect and green on the control ==")
 import checks as CK
 bad = CK.selftest()
-for name in ["one inbox, one archive", "three levels, no deeper", "no empty folder", "the law describes the tool it governs",
+for name in ["one inbox, one archive", "no notebook of one", "no empty folder", "the law describes the tool it governs",
              "a project is a goal with a deadline", "every accepted exception still applies"]:
     check(f"rule '{name}' exists and proves itself", any(r.name == name for r in CK.RULES) and not any(b.startswith(name) for b in bad))
 check("the selftest is clean for every rule", bad == [])
