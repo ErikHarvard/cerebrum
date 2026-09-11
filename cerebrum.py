@@ -1058,12 +1058,14 @@ def cmd_undo(a):
     return 1 if notes else 0
 
 def loss_since(vault, manifest_path, frozen=lambda p: False):
-    """Files the manifest listed (sha, size, path per row) whose bytes are gone now — no file in the vault
-    holds that hash any more — outside the frozen register. A moved or renamed file is not a loss."""
+    """Files the manifest listed (sha, size, path per row) that are gone now: the path is absent AND no file
+    in the vault holds those bytes any more — outside the frozen register. A file moved, renamed, or
+    edited in place is not a loss."""
     with open(manifest_path, encoding="utf-8") as fh:
         rows = [ln.split("\t") for ln in fh.read().splitlines() if ln and not ln.startswith("#")]
-    here = {sha256(os.path.join(vault, p)) for p in rels(vault)}
-    return [r[2] for r in rows if len(r) >= 3 and not frozen(r[2]) and r[0] not in here]
+    paths = set(rels(vault))
+    hashes = {sha256(os.path.join(vault, p)) for p in paths}
+    return [r[2] for r in rows if len(r) >= 3 and not frozen(r[2]) and r[2] not in paths and r[0] not in hashes]
 
 def cmd_pass(_a):
     """D2 (Law Revision I): "Prepare the pass" as one read-only command — the check, the inbox with each
