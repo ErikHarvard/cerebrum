@@ -791,6 +791,40 @@ try:
 finally:
     shutil.rmtree(tmp13, ignore_errors=True)
 
+print("== a path vacated and filled again: a split note's own lines recomposed where it was ==")
+tmp14 = tempfile.mkdtemp(prefix="cerebrum-reuse-")
+try:
+    v, ocfg = organ_vault(tmp14)
+    base = [r for r in keep_all(v, ocfg) if r["note"] != "# INBOX/Two.md"]
+    eX = SEM.effective(v, ocfg, base + [rec(v, "# INBOX/Two.md", "P000"),
+                                        rec(v, "# INBOX/Two.md", "P001", dest="2 AREAS/Beta.md")])[0]
+    agreed, runs, _ = SEM.agree_detail(v, eX, eX)
+    plan = SEM.propose(v, ocfg, agreed, runs, today="2026-01-01")[0]
+    pp = os.path.join(tmp14, "p.tsv")
+    ops = write_plan(pp, plan)
+    before = manifest(v)
+    errs, exp, _ = C.simulate(v, ops, before)
+    arc = exp["moves"].get("# INBOX/Two.md", "")
+    check("the plan archives the note and recomposes its own lines at the same path",
+          errs == [] and arc.startswith("4 ARCHIVE/") and "# INBOX/Two.md" in exp["added"])
+    two = open(os.path.join(v, "# INBOX", "Two.md"), "rb").read()
+    undo14 = os.path.join(tmp14, "u.tsv")
+    ok, f, _ = C.apply_plan(v, ops, before, C._scratch_trash_fn(os.path.join(tmp14, "_t")), undo14)
+    check("apply → verify GREEN: the old bytes held to the move, the path to the new note", ok)
+    if not ok: print("     ", f[:4])
+    vv = lambda w: C._verify(w, before, exp["moves"], exp["removed"], exp["hashes"], expected_added=exp["added"])[0]
+    t1 = copy(v, os.path.join(tmp14, "t1")); open(os.path.join(t1, "# INBOX", "Two.md"), "ab").write(b"x")
+    check("red: the recomposed note tampered", not vv(t1))
+    t2 = copy(v, os.path.join(tmp14, "t2")); os.remove(os.path.join(t2, arc))
+    check("red: the archived original lost", not vv(t2))
+    t3 = copy(v, os.path.join(tmp14, "t3")); open(os.path.join(t3, arc), "ab").write(b"x")
+    check("red: the archived original altered", not vv(t3))
+    check("undo restores the note exactly", C.undo_plan(v, undo14) == [] and C._verify(v, before)[0]
+          and open(os.path.join(v, "# INBOX", "Two.md"), "rb").read() == two)
+    check("and the rehearsal of that plan passes end to end", R.rehearse(pp, v, snapshot=False, say=quiet))
+finally:
+    shutil.rmtree(tmp14, ignore_errors=True)
+
 print("== embedding windows: a character budget, never a word count; no word lost ==")
 dense = " ".join(f"https://example.com/video/BV{i:08d}?spm_id_from=333.337.search-card.all.click" for i in range(300))
 ws = SEM.windows(dense + " " + "x" * 4000)

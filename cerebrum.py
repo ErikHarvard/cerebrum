@@ -309,8 +309,11 @@ def _verify(vault, before_rows, expected_moves=None, expected_removed=None, expe
 
     # (1) ratified moves, matched exactly by (src, dst) BEFORE any hash pairing — so two
     # identical files moved to different places can never be cross-paired.
+    # A path a planned move vacates and a planned new note fills again (a split note's own lines,
+    # recomposed where the note was): the old bytes are held to the move, the path to the new note.
+    reused = {s for s in exp_moves if s in exp_added}
     for s, d in sorted(exp_moves.items()):
-        if s in removed and d in added:
+        if (s in removed or (s in reused and s in a)) and d in added:
             if after[d] != exp_hashes.get(d, before[s]):
                 findings.append(f"RED moved but content differs from the plan: {s} -> {d}")
             removed.discard(s); added.discard(d); touched |= {s, d}
@@ -318,7 +321,7 @@ def _verify(vault, before_rows, expected_moves=None, expected_removed=None, expe
             findings.append(f"RED planned move did not happen: {s} -> {d}")
 
     # (2) in-place changes: only the plan's content changes, and exactly those bytes
-    for p in sorted(b & a):
+    for p in sorted((b & a) - reused):              # a reused path is checked as a planned new note, below
         if before[p] != after[p]:
             touched.add(p)
             if exp_hashes.get(p) != after[p]:
@@ -337,7 +340,7 @@ def _verify(vault, before_rows, expected_moves=None, expected_removed=None, expe
 
     # (3b) planned new files (a merge): present, holding exactly the planned bytes
     for p, h in sorted(exp_added.items()):
-        if p in added:
+        if p in added or (p in reused and p in a):
             added.discard(p); touched.add(p)
             if after[p] != h:
                 findings.append(f"RED created but content differs from the plan: {p}")
