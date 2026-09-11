@@ -506,7 +506,7 @@ def cmd_selftest(_a):
 #   <spec>: comma-separated parts (P012), runs of parts (P011-P022) or line ranges (L1542-L1600),
 #   from `semantics.py segment`, in the order they are to appear.
 ARITY = {"mkdir": 1, "rmdir": 1, "trash": 1, "mv": 2, "append": 3,
-         "compose": 3, "extend": 3, "leave": 2, "partition": 2, "synthesize": 2, "dedupe": 2}
+         "compose": 3, "extend": 3, "insert": 4, "leave": 2, "partition": 2, "synthesize": 2, "dedupe": 2}
 
 def load_plan(path):
     ops = []
@@ -534,7 +534,22 @@ def provenance(op, src, sp):
     where = ", ".join(f"L{a}–L{b}" if a != b else f"L{a}" for a, b in sp)
     if op == "compose":
         return f"*Composed verbatim from `{src}`, {where} — the source is kept whole.*\n\n".encode()
+    if op == "insert":
+        return f"*Inserted verbatim from `{src}`, {where}.*\n\n".encode()
     return f"*Appended verbatim from `{src}`, {where}.*\n\n".encode()
+
+def _insert_bytes(old_b, after, block):
+    """A note with `block` inserted after line `after` (0 = before the first line), on its own lines
+    with a blank line either side. Returns (new bytes, start, length) of the inserted region, so the
+    undo can cut exactly it back out."""
+    lines = old_b.splitlines(keepends=True)
+    head, tail = b"".join(lines[:after]), b"".join(lines[after:])
+    if head and not head.endswith(b"\n"):
+        head += b"\n"
+    if not block.endswith(b"\n"):
+        block += b"\n"
+    region = (b"\n" if head else b"") + block + (b"\n" if tail else b"")
+    return head + region + tail, len(head), len(region)
 
 def _merge_bytes(dst, sources, read):
     """The merged note's bytes, and where each source's own bytes sit inside it: {path: (offset, length)}.
@@ -601,7 +616,8 @@ def simulate(vault, ops, before_rows):
             dirs.discard(q); dirs.add(d + q[len(s):])
 
     for n, op, args in ops:
-        paths = args[:2] if op in ("mv", "append", "dedupe") else [] if op in ("leave", "partition") else args[:1]
+        paths = args[:2] if op in ("mv", "append", "dedupe") else [] if op in ("leave", "partition") \
+            else [args[0], args[2]] if op == "insert" else args[:1]
         if any(is_frozen(p) for p in paths):
             errors.append(f"line {n}: touches the frozen register: {paths}"); continue
         if op in ("synthesize", "dedupe"):
@@ -683,9 +699,9 @@ def simulate(vault, ops, before_rows):
             files[dst] = hashlib.sha256(data).hexdigest()
             origin[dst] = "(created) " + dst
             contained.update({origin[p]: [dst, off, ln] for p, (off, ln) in where.items()})
-        elif op in ("compose", "extend", "leave", "partition"):
+        elif op in ("compose", "extend", "insert", "leave", "partition"):
             import semantics
-            src = args[1] if op in ("compose", "extend") else args[0]
+            src = args[2] if op == "insert" else args[1] if op in ("compose", "extend") else args[0]
             if src not in files:
                 errors.append(f"line {n}: {op} source missing: {src}"); continue
             data_src = content(src)
@@ -696,7 +712,7 @@ def simulate(vault, ops, before_rows):
                 pinned[origin[src]] = n_lines
                 continue
             try:
-                sp = semantics.spans(args[2] if op in ("compose", "extend") else args[1], semantics.segment(data_src))
+                sp = semantics.spans(args[3] if op == "insert" else args[2] if op in ("compose", "extend") else args[1], semantics.segment(data_src))
             except (KeyError, ValueError) as e:
                 errors.append(f"line {n}: {src}: no such part or line: {e}"); continue
             bad = [(a, b) for a, b in sp if not 1 <= a <= b <= n_lines]
@@ -714,12 +730,25 @@ def simulate(vault, ops, before_rows):
                 if case_clash(dst): errors.append(f"line {n}: compose target differs only by case from an existing name: {dst}"); continue
                 data = provenance("compose", src, sp) + piece
                 origin[dst] = "(created) " + dst
+            elif op == "insert":
+                if dst not in files or not dst.endswith(".md"):
+                    errors.append(f"line {n}: insert needs an existing note: {dst}"); continue
+                old_b = content(dst)
+                m = re.fullmatch(r"L(\d+)", args[1])
+                n_dst = len(old_b.splitlines(keepends=True))
+                if not m or not 0 <= int(m.group(1)) <= n_dst:
+                    errors.append(f"line {n}: insert after must be L0…L{n_dst} of {dst}, not {args[1]!r}"); continue
+                block = provenance("insert", src, sp) + piece
+                data, start, _ = _insert_bytes(old_b, int(m.group(1)), block)
             else:
                 if dst not in files or not dst.endswith(".md"):
                     errors.append(f"line {n}: extend needs an existing note: {dst}"); continue
                 old_b = content(dst)
                 data = old_b + (b"\n" if old_b.endswith(b"\n") else b"\n\n") + provenance("extend", src, sp) + piece
-            base, off = len(data) - len(piece), 0
+            if op == "insert":
+                base, off = start + 1 + len(provenance("insert", src, sp)), 0
+            else:
+                base, off = len(data) - len(piece), 0
             for a, b in sp:
                 ln = len(semantics.take(data_src, [(a, b)]))
                 contained[f"{origin[src]}#L{a}-L{b}"] = [dst, base + off, ln]
@@ -885,6 +914,22 @@ def apply_plan(vault, ops, before_rows, trash_fn, undo_path, frozen_live=False):
                     shutil.copymode(J(src), tmp)
                     os.replace(tmp, J(src))
                     ok = sha256(J(arc)) == h_old and sha256(J(src)) == h_new
+                elif op == "insert":
+                    dst, after, src, spec = args
+                    import semantics
+                    with open(J(src), "rb") as fh:
+                        data_src = fh.read()
+                    sp = semantics.spans(spec, semantics.segment(data_src))
+                    with open(J(dst), "rb") as fh:
+                        old_b = fh.read()
+                    new, start, ln = _insert_bytes(old_b, int(after[1:]), provenance("insert", src, sp) + semantics.take(data_src, sp))
+                    _log(log, "insert", dst, start, ln, hashlib.sha256(old_b).hexdigest())
+                    tmp = J(dst) + ".cerebrum-tmp"
+                    with open(tmp, "wb") as fh:
+                        fh.write(new); fh.flush(); os.fsync(fh.fileno())
+                    shutil.copymode(J(dst), tmp)
+                    os.replace(tmp, J(dst))
+                    ok = sha256(J(dst)) == hashlib.sha256(new).hexdigest()
                 elif op in ("compose", "extend"):
                     dst, src, spec = args
                     import semantics
@@ -946,6 +991,15 @@ def undo_plan(vault, undo_path):
             s, d = args
             if os.path.lexists(J(d)) and not os.path.lexists(J(s)):
                 os.rename(J(d), J(s))
+        elif op == "insert":
+            d, start, ln, sha_old = args
+            with open(J(d), "rb") as fh: data = fh.read()
+            if hashlib.sha256(data).hexdigest() != sha_old:
+                cut = data[:int(start)] + data[int(start) + int(ln):]
+                if hashlib.sha256(cut).hexdigest() != sha_old:
+                    notes.append(f"could not un-insert into {d} — it changed around the inserted lines; restore it from the snapshot")
+                    continue
+                with open(J(d), "wb") as fh: fh.write(cut)
         elif op in ("append", "extend"):
             d, _s, n_old, sha_old = args
             with open(J(d), "rb") as fh: data = fh.read()

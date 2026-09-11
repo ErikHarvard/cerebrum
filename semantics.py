@@ -658,7 +658,25 @@ def validate(r, sha, cfg):
         out.append("merge needs relation ≡ or = — ≅ is a link, parallax a keep (PT 9.2)")
     if op == "link" and not r.get("with"):
         out.append("link needs with: the notes it relates to")
+    at = str(r.get("at", "") or "").strip()
+    if at:
+        if op not in PLACING or not d:
+            out.append("`at` needs op keep or merge with a dest: the existing note the lines go into")
+        elif not re.fullmatch(r"after (P\d{3}|L\d+)", at):
+            out.append(f"`at` must be 'after Pnnn' or 'after Lnnn' of the destination, not {at!r}")
     return out
+
+def anchor_line(vault, dest, at):
+    """The line of `dest` after which lines go: 'after Pnnn' → that part's last line; 'after Lnnn' → n.
+    None when the anchor names nothing in the note as it is now."""
+    m = re.fullmatch(r"after (P\d{3}|L\d+)", str(at or "").strip())
+    if not m or not os.path.isfile(os.path.join(vault, dest)):
+        return None
+    data = read_bytes(vault, dest)
+    if m.group(1).startswith("L"):
+        n = int(m.group(1)[1:])
+        return n if 0 <= n <= len(data.splitlines(keepends=True)) else None
+    return next((p["end"] for p in segment(data) if p["id"] == m.group(1)), None)
 
 def effective(vault, cfg, recs, notes=None):
     """Coverage: each line of each note in scope → the one record that places it. A line named by
@@ -756,7 +774,7 @@ def agree_detail(vault, effA, effB):
         return ("path", d) if os.path.isfile(os.path.join(vault, d)) else ("new", os.path.dirname(d), g[d])
     def what(r, s):
         return ("" if r["op"] in PLACING else r["op"], s.get(r["dest"]) if r["op"] == "synthesize" else None,
-                tuple(sorted(r.get("with", []))) if r["op"] == "link" else ())
+                tuple(sorted(r.get("with", []))) if r["op"] == "link" else (), str(r.get("at", "") or "").strip())
     def extend_run(runs, cur, rel, l, a, b):
         if cur and cur["a"] is a and cur["b"] is b:
             cur["last"] = l; return cur
@@ -772,7 +790,8 @@ def agree_detail(vault, effA, effB):
             elif what(a, sA) == what(b, sB):
                 agreed[rel][l], cur, cur_act = a, None, None
             else:                                   # the act is not done: the line only stays where both put it
-                agreed[rel][l] = a if a["op"] in PLACING else plain.setdefault(id(a), dict(a, op="keep", dest=""))
+                agreed[rel][l] = (plain.setdefault(id(a), dict(a, at="")) if a["op"] in PLACING
+                                  else plain.setdefault(id(a), dict(a, op="keep", dest="", at="")))
                 cur, cur_act = None, extend_run(act_runs, cur_act, rel, l, a, b)
     return agreed, runs, act_runs
 
@@ -908,13 +927,20 @@ def propose(vault, cfg, agreed, runs, today=None):
         if d == LEAVE:
             continue
         live, first = exists(d) and d not in dissolved and d not in moved, True
+        inserts = []
         for rel, ls in contrib[d]:
             if (rel == d and rel not in dissolved) or moved.get(rel) == d:
                 first = False; continue             # already there: its own lines, or the note itself moved in
             if first and not live:
                 mkdirs(d)
-            plan.append(f"{'extend' if live or not first else 'compose'}\t{d}\t{dissolved[rel]}\t{_spec(ls)}")
+            ats = {str(agreed[rel].get(l, {}).get("at", "") or "").strip() for l in ls if l in agreed[rel]} - {""}
+            if live and len(ats) == 1 and anchor_line(vault, d, next(iter(ats))) is not None:
+                inserts.append((anchor_line(vault, d, next(iter(ats))), f"insert\t{d}\tL{{}}\t{dissolved[rel]}\t{_spec(ls)}"))
+            else:
+                plan.append(f"{'extend' if live or not first else 'compose'}\t{d}\t{dissolved[rel]}\t{_spec(ls)}")
             first = False
+        for at, line in sorted(inserts, key=lambda x: -x[0]):   # later anchors first, so earlier lines keep their numbers
+            plan.append(line.format(at))
         if len(contrib[d]) > 1:
             gathered[d] = [(rel, len(ls)) for rel, ls in contrib[d]]
     dedupe = [rel for rel in place if set(place[rel].values()) == {rel}

@@ -1017,6 +1017,52 @@ try:
 finally:
     shutil.rmtree(tmp19, ignore_errors=True)
 
+print("== insert: lines land after the section the readers named, verbatim, with provenance; undo cuts them back out ==")
+tmp20 = tempfile.mkdtemp(prefix="cerebrum-insert-")
+try:
+    v, ocfg = organ_vault(tmp20)
+    songs = os.path.join(v, "3 RESOURCES", "Songs.md"); s_before = open(songs, "rb").read()
+    parts = SEM.segment(s_before); end_p0 = parts[0]["end"]
+    ops = write_plan(os.path.join(tmp20, "p.tsv"), [f"insert\t3 RESOURCES/Songs.md\tL{end_p0}\t# INBOX/Two.md\tP001"])
+    before = manifest(v); errs, exp, _ = C.simulate(v, ops, before)
+    check("the dry run accepts an insert after a real line", errs == [])
+    ok, f, _ = C.apply_plan(v, ops, before, C._scratch_trash_fn(os.path.join(tmp20, "_t")), os.path.join(tmp20, "u.tsv"))
+    s_now = open(songs, "rb").read(); two = open(os.path.join(v, "# INBOX", "Two.md"), "rb").read()
+    piece = SEM.take(two, SEM.spans("P001", SEM.segment(two)))
+    head = b"".join(s_before.splitlines(keepends=True)[:end_p0]); tail = b"".join(s_before.splitlines(keepends=True)[end_p0:])
+    check("applied GREEN: head of the note, then the provenance line and the piece, then the rest — byte for byte",
+          ok and s_now.startswith(head) and s_now.endswith(tail) and piece in s_now and b"*Inserted verbatim from `# INBOX/Two.md`" in s_now
+          and s_now.index(piece) > len(head) and len(s_now) == len(head) + len(tail) + len(s_now) - len(head) - len(tail))
+    check("the verifier's expected bytes are the dry run's, and they match", exp["hashes"]["3 RESOURCES/Songs.md"] == C.sha256(songs))
+    check("undo cuts exactly the inserted region back out", C.undo_plan(v, os.path.join(tmp20, "u.tsv")) == [] and open(songs, "rb").read() == s_before)
+    check("insert after a line the note does not have is refused",
+          C.simulate(v, write_plan(os.path.join(tmp20, "q.tsv"), ["insert\t3 RESOURCES/Songs.md\tL999\t# INBOX/Two.md\tP001"]), manifest(v))[0] != [])
+    check("insert into a note that does not exist is refused",
+          C.simulate(v, write_plan(os.path.join(tmp20, "r.tsv"), ["insert\t3 RESOURCES/Nope.md\tL1\t# INBOX/Two.md\tP001"]), manifest(v))[0] != [])
+    # the reading side: `at` names the section; agreement; the plan says insert
+    base = [r for r in keep_all(v, ocfg) if r["note"] != "# INBOX/Two.md"]
+    a = rec(v, "# INBOX/Two.md", "P001", dest="3 RESOURCES/Songs.md"); a["at"] = "after P000"
+    b = rec(v, "# INBOX/Two.md", "P001", dest="3 RESOURCES/Songs.md"); b["at"] = "after P000"
+    eA = SEM.effective(v, ocfg, base + [rec(v, "# INBOX/Two.md", "P000"), a])[0]
+    eB = SEM.effective(v, ocfg, base + [rec(v, "# INBOX/Two.md", "P000"), b])[0]
+    agreed, runs, acts = SEM.agree_detail(v, eA, eB)
+    plan = SEM.propose(v, ocfg, agreed, runs, today="2026-01-01")[0]
+    check("both readers name the same section → the plan inserts after its last line",
+          runs == [] and acts == [] and any(l.startswith(f"insert\t3 RESOURCES/Songs.md\tL{end_p0}\t") for l in plan)
+          and C.simulate(v, write_plan(os.path.join(tmp20, "s.tsv"), plan), manifest(v))[0] == [])
+    b2 = dict(b, at="after P001")
+    eB2 = SEM.effective(v, ocfg, base + [rec(v, "# INBOX/Two.md", "P000"), b2])[0]
+    agreed2, runs2, acts2 = SEM.agree_detail(v, eA, eB2)
+    plan2 = SEM.propose(v, ocfg, agreed2, runs2, today="2026-01-01")[0]
+    check("they agree on the note but not the section → the lines still go there, appended; the slot is an act dispute for the keeper",
+          runs2 == [] and len(acts2) == 1 and any(l.startswith("extend\t3 RESOURCES/Songs.md\t") for l in plan2) and not any(l.startswith("insert") for l in plan2))
+    bad = dict(a, at="after nowhere")
+    check("a malformed `at` is refused", any("`at`" in p for p in SEM.effective(v, ocfg, base + [rec(v, "# INBOX/Two.md", "P000"), bad])[1]))
+    bad2 = dict(rec(v, "# INBOX/Two.md", "P001"), at="after P000")
+    check("`at` without a destination is refused", any("`at`" in p for p in SEM.effective(v, ocfg, base + [rec(v, "# INBOX/Two.md", "P000"), bad2])[1]))
+finally:
+    shutil.rmtree(tmp20, ignore_errors=True)
+
 print("== registry: a live note inside its archived original is not proposed for removal ==")
 s, root, cfg = K._scratch()
 try:
