@@ -493,10 +493,16 @@ def cmd_selftest(_a):
 #   leave   <src.md> <spec>           pieces deliberately left only in src, placed nowhere else
 #   partition <src.md> <sha256>       src is distributed completely: its bytes must still hash to
 #                                     sha256, and every line is composed, extended or left exactly once
+#   synthesize <new.md> <draft>       a new note holding the draft's bytes (draft: a file outside the
+#                                     vault). Every paragraph cites a source part ([S1]) listed under
+#                                     '## Sources' with its hash; an uncited paragraph or a changed
+#                                     source is refused. The sources are only read.
+#   dedupe  <note.md> <archive.md>    later copies of repeated lines dropped from the note; the whole
+#                                     original is kept at <archive.md> — nothing is lost
 #   <spec>: comma-separated parts (P012), runs of parts (P011-P022) or line ranges (L1542-L1600),
 #   from `semantics.py segment`, in the order they are to appear.
 ARITY = {"mkdir": 1, "rmdir": 1, "trash": 1, "mv": 2, "append": 3,
-         "compose": 3, "extend": 3, "leave": 2, "partition": 2}
+         "compose": 3, "extend": 3, "leave": 2, "partition": 2, "synthesize": 2, "dedupe": 2}
 
 def load_plan(path):
     ops = []
@@ -582,9 +588,39 @@ def simulate(vault, ops, before_rows):
             dirs.discard(q); dirs.add(d + q[len(s):])
 
     for n, op, args in ops:
-        paths = args[:2] if op in ("mv", "append") else [] if op in ("leave", "partition") else args[:1]
+        paths = args[:2] if op in ("mv", "append", "dedupe") else [] if op in ("leave", "partition") else args[:1]
         if any(is_frozen(p) for p in paths):
             errors.append(f"line {n}: touches the frozen register: {paths}"); continue
+        if op in ("synthesize", "dedupe"):
+            import semantics
+            new = args[0] if op == "synthesize" else args[1]          # the file this op creates
+            if exists(new): errors.append(f"line {n}: {op} would clobber: {new}"); continue
+            if not parent_ok(new): errors.append(f"line {n}: {op} destination folder missing: {new}"); continue
+            if not new.endswith(".md"): errors.append(f"line {n}: {op} target is not a note: {new}"); continue
+            if case_clash(new): errors.append(f"line {n}: {op} target differs only by case from an existing name: {new}"); continue
+        if op == "synthesize":
+            try:
+                with open(os.path.expanduser(args[1]), "rb") as fh:
+                    data = fh.read()
+            except OSError as e:
+                errors.append(f"line {n}: synthesis draft unreadable: {e}"); continue
+            probs = semantics.check_synthesis(data, lambda p: content(p) if p in files else None)
+            if probs:
+                errors += [f"line {n}: synthesis {args[0]}: {p}" for p in probs]; continue
+            buf[args[0]], files[args[0]] = data, hashlib.sha256(data).hexdigest()
+            origin[args[0]] = "(created) " + args[0]
+            continue
+        if op == "dedupe":
+            src, arc = args
+            if src not in files or not src.endswith(".md"):
+                errors.append(f"line {n}: dedupe needs an existing note: {src}"); continue
+            data = content(src)
+            new_b, dropped = semantics.dedupe_bytes(data)
+            if not dropped:
+                errors.append(f"line {n}: nothing repeats in {src}"); continue
+            buf[arc], files[arc], origin[arc] = data, hashlib.sha256(data).hexdigest(), "(created) " + arc
+            buf[src], files[src] = new_b, hashlib.sha256(new_b).hexdigest()
+            continue
         if op == "mkdir":
             (p,) = args
             if exists(p): errors.append(f"line {n}: mkdir target exists: {p}"); continue
@@ -807,6 +843,35 @@ def apply_plan(vault, ops, before_rows, trash_fn, undo_path, frozen_live=False):
                     with open(J(dst), "xb") as fh:
                         fh.write(data); fh.flush(); os.fsync(fh.fileno())
                     ok = sha256(J(dst)) == made
+                elif op == "synthesize":
+                    dst = args[0]
+                    if os.path.lexists(J(dst)):
+                        return False, [f"line {n}: stopped — destination appeared: {dst}"], expect
+                    with open(os.path.expanduser(args[1]), "rb") as fh:
+                        data = fh.read()
+                    made = hashlib.sha256(data).hexdigest()
+                    _log(log, "synthesize", dst, made)
+                    with open(J(dst), "xb") as fh:
+                        fh.write(data); fh.flush(); os.fsync(fh.fileno())
+                    ok = sha256(J(dst)) == made          # a draft changed since the dry run fails the verify
+                elif op == "dedupe":
+                    src, arc = args
+                    import semantics
+                    if os.path.lexists(J(arc)):
+                        return False, [f"line {n}: stopped — destination appeared: {arc}"], expect
+                    with open(J(src), "rb") as fh:
+                        old = fh.read()
+                    new_b = semantics.dedupe_bytes(old)[0]
+                    h_old, h_new = hashlib.sha256(old).hexdigest(), hashlib.sha256(new_b).hexdigest()
+                    _log(log, "dedupe", src, arc, h_old, h_new)
+                    with open(J(arc), "xb") as fh:              # the whole original first
+                        fh.write(old); fh.flush(); os.fsync(fh.fileno())
+                    tmp = J(src) + ".cerebrum-tmp"
+                    with open(tmp, "wb") as fh:
+                        fh.write(new_b); fh.flush(); os.fsync(fh.fileno())
+                    shutil.copymode(J(src), tmp)
+                    os.replace(tmp, J(src))
+                    ok = sha256(J(arc)) == h_old and sha256(J(src)) == h_new
                 elif op in ("compose", "extend"):
                     dst, src, spec = args
                     import semantics
@@ -876,7 +941,20 @@ def undo_plan(vault, undo_path):
                     notes.append(f"could not un-merge {d} — it no longer starts with its original bytes; restore it from the snapshot")
                     continue
                 with open(J(d), "wb") as fh: fh.write(cut)
-        elif op in ("merge", "compose"):
+        elif op == "dedupe":
+            src, arc, h_old, h_new = args
+            if os.path.lexists(J(arc)) and sha256(J(arc)) == h_old:
+                cur = sha256(J(src)) if os.path.lexists(J(src)) else None
+                if cur == h_new:
+                    with open(J(arc), "rb") as fh: old = fh.read()
+                    with open(J(src), "wb") as fh: fh.write(old)
+                if cur in (h_new, h_old):
+                    os.remove(J(arc))
+                else:
+                    notes.append(f"could not undo the dedupe of {src} — its original is at {arc}")
+            elif os.path.lexists(J(arc)):
+                notes.append(f"{arc} changed after the dedupe — left in place")
+        elif op in ("merge", "compose", "synthesize"):
             dst, made = args[0], args[1]
             if os.path.lexists(J(dst)):
                 if sha256(J(dst)) == made:

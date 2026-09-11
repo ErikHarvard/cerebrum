@@ -526,6 +526,208 @@ try:
 finally:
     shutil.rmtree(probe, ignore_errors=True)
 
+print("== the semantic organ: scope, index controls, coverage, agreement ==")
+SUNO = ("suno prompt formula verse chorus bridge tempo mood genre vocal style hook melody lyric rhythm "
+        "beat producer arrangement sample layer synth bass drum mix master song track release playlist")
+LIFT = ("barbell deadlift spine brace core hinge hips grip chalk plates rack squat bench press sets reps "
+        "rest load progression warmup cooldown mobility stretch recovery sleep protein strength power")
+SAME = ("river stone lantern harbor meadow copper violet orchard glacier canyon ember falcon marble "
+        "thistle willow quartz saffron tundra beacon cedar lagoon pepper sparrow velvet cobalt ridge "
+        "juniper harvest compass garnet mosaic")
+def organ_vault(root):
+    v = os.path.join(root, "vault")
+    files = {
+        "# INBOX/Mixed.md": f"# Suno\n{SUNO}\n\n# Deadlift\n{LIFT}\n",
+        "# INBOX/Two.md": f"# Alpha\nalpha {SAME}\n\n# Beta\nbeta {LIFT}\n",
+        "# INBOX/Secret.md": "password: never read this\n",
+        "3 RESOURCES/Songs.md": f"# Songwriting\n{SUNO} lyrics\n\n# Hooks\n{SUNO} hooks\n",
+        "3 RESOURCES/Training.md": f"# Lifting\n{LIFT} lifting\n\n# Program\n{LIFT} program\n",
+        "2 AREAS/Copy A.md": f"# Same\n{SAME}\n",
+        "4 ARCHIVE/Copy B.md": f"# Same\n{SAME}\n",
+        "2 AREAS/Aph.md": ("# Sayings\n- the rejection of pleasure is the pleasure of rejection\n"
+                           "- a distinct saying about the sea and the sky\n"
+                           "* the rejection of pleasure is the pleasure of rejection\n"
+                           "- a third line with enough words\n"
+                           "-   the rejection of pleasure is the pleasure of rejection\n"),
+        "AGENT MEMORY/mem.md": "frozen memory\n"}
+    for p, t in files.items():
+        os.makedirs(os.path.dirname(os.path.join(v, p)), exist_ok=True)
+        open(os.path.join(v, p), "w").write(t)
+    cfg = {"para": list(C.PARA), "frozen": [{"root": "AGENT MEMORY", "pins": []}],
+           "accepted": {"sensitive": ["# INBOX/Secret.md"]}}
+    return v, cfg
+def rec(v, note, lines="*", op="keep", dest="", relation="", with_=None):
+    return {"note": note, "note_sha": C.sha256(os.path.join(v, note)), "lines": lines, "op": op, "dest": dest,
+            "relation": relation, "with": with_ or [], "subject": "s", "use": "u", "why": "test"}
+def keep_all(v, cfg, **override):
+    return [override.get(n) or rec(v, n) for n in SEM.scope(v, cfg)]
+tmp8 = tempfile.mkdtemp(prefix="cerebrum-organ-")
+try:
+    v, ocfg = organ_vault(tmp8)
+    sc = SEM.scope(v, ocfg)
+    check("scope: the sensitive note is never read, the frozen folder never", "# INBOX/Secret.md" not in sc
+          and not any(p.startswith("AGENT MEMORY") for p in sc) and "3 RESOURCES/Songs.md" in sc)
+    calls = []
+    counting = lambda t, c=None: (calls.append(len(t)), SEM.fake_embed(t))[1]
+    cache = os.path.join(tmp8, "cache.json")
+    ix = SEM.index(v, ocfg, embed=counting, cache_path=cache, probe=False)   # a word-counter cannot pass a paraphrase probe
+    check("index control: the identical copies find each other", ix["control"] and ix["control"][0]["found"] is True)
+    check("  … and the index is believed", SEM.index_ok(ix))
+    check("the note holding two subjects ranks least coherent", ix["within"][0]["note"] == "# INBOX/Mixed.md")
+    mixed_suno = [x for x in ix["across"] if {x["a"]["note"], x["b"]["note"]} >= {"# INBOX/Mixed.md", "3 RESOURCES/Songs.md"}]
+    check("a section on one subject finds its subject in another note", bool(mixed_suno))
+    check("repeats inside a note: one line, two extra copies (list markers and spacing ignored)",
+          ix["repeats"].get("2 AREAS/Aph.md", {}).get("extra_copies") == 2)
+    n_calls = len(calls)
+    SEM.index(v, ocfg, embed=counting, cache_path=cache, probe=False)
+    check("the cache: an unchanged vault is not embedded again", n_calls > 0 and len(calls) == n_calls)
+    blind = SEM.index(v, ocfg, embed=lambda t, c=None: [[1.0] * 8 for _ in t], probe=True)
+    check("an embedder that cannot tell texts apart fails the control AND the probe (red paths)",
+          not SEM.index_ok(blind) and blind["control"][0]["found"] is False and blind["probe"]["ok"] is False)
+
+    eff, probs = SEM.effective(v, ocfg, keep_all(v, ocfg))
+    check("coverage: a reading that places every line once is clean", probs == [] and len(eff) == len(sc))
+    def probs_for(recs):
+        return SEM.effective(v, ocfg, recs)[1]
+    check("coverage red: a note nobody read", any("not read" in p for p in probs_for(keep_all(v, ocfg)[1:])))
+    twice = keep_all(v, ocfg) + [rec(v, "# INBOX/Mixed.md", "P000")] + [rec(v, "# INBOX/Mixed.md", "L2")]
+    check("coverage red: a line placed twice", any("placed twice" in p for p in probs_for(
+        [r for r in twice if not (r["note"] == "# INBOX/Mixed.md" and r["lines"] == "*")])))
+    stale = rec(v, "# INBOX/Mixed.md"); stale["note_sha"] = "0" * 64
+    check("coverage red: a record for an older version of its note",
+          any("changed since it was read" in p for p in probs_for(keep_all(v, ocfg, **{"# INBOX/Mixed.md": stale}))))
+    check("coverage red: an unknown part", any("no such part" in p for p in probs_for(
+        keep_all(v, ocfg, **{"# INBOX/Mixed.md": rec(v, "# INBOX/Mixed.md", "P009")}))))
+    check("coverage red: lines nobody placed (no '*')", any("not read — the first" in p for p in probs_for(
+        keep_all(v, ocfg, **{"# INBOX/Mixed.md": rec(v, "# INBOX/Mixed.md", "P001")}))))
+    check("a merge must name ≡ or = — a same-structure pair is a link (PT 9.2)", any("merge needs relation" in p for p in probs_for(
+        keep_all(v, ocfg, **{"# INBOX/Mixed.md": rec(v, "# INBOX/Mixed.md", op="merge", dest="3 RESOURCES/Songs.md", relation="≅")}))))
+    split = lambda a, b: [rec(v, "# INBOX/Two.md", "P000", dest=a), rec(v, "# INBOX/Two.md", "P001", dest=b)]
+    base = [r for r in keep_all(v, ocfg) if r["note"] != "# INBOX/Two.md"]
+    eA, pA = SEM.effective(v, ocfg, base + split("3 RESOURCES/Alpha.md", "2 AREAS/Beta.md"))
+    eB, pB = SEM.effective(v, ocfg, base + split("3 RESOURCES/First.md", "2 AREAS/Second.md"))
+    check("  (the split readings are clean — the agreement below looked at the split)", pA == pB == [] and "# INBOX/Two.md" in eA)
+    check("agreement: a new note is known by what it holds, not by its name", SEM.agree(v, eA, eB)[1] == [])
+    eC = SEM.effective(v, ocfg, base + split("3 RESOURCES/Alpha.md", "3 RESOURCES/Beta.md"))[0]
+    runs = SEM.agree(v, eA, eC)[1]
+    check("agreement red: the readers send lines to different places → a dispute for the keeper",
+          len(runs) == 1 and runs[0]["note"] == "# INBOX/Two.md")
+finally:
+    shutil.rmtree(tmp8, ignore_errors=True)
+
+print("== the organ: agreed readings → a plan the mover proves → lossless apply → convergence → undo ==")
+tmp9 = tempfile.mkdtemp(prefix="cerebrum-organ2-")
+try:
+    v, ocfg = organ_vault(tmp9)
+    def reading(two_a, two_b):
+        r = [x for x in keep_all(v, ocfg) if x["note"] not in
+             ("# INBOX/Mixed.md", "# INBOX/Two.md", "2 AREAS/Copy A.md", "2 AREAS/Aph.md")]
+        return r + [rec(v, "# INBOX/Mixed.md", "P000", "merge", "3 RESOURCES/Songs.md", "="),
+                    rec(v, "# INBOX/Mixed.md", "P001", dest="3 RESOURCES/Training.md"),
+                    rec(v, "# INBOX/Two.md", "P000", dest=two_a), rec(v, "# INBOX/Two.md", "P001", dest=two_b),
+                    rec(v, "2 AREAS/Copy A.md", dest="3 RESOURCES/Copy A.md"), rec(v, "2 AREAS/Aph.md", op="dedupe")]
+    eA, pA = SEM.effective(v, ocfg, reading("3 RESOURCES/Alpha.md", "2 AREAS/Beta.md"))
+    eB, pB = SEM.effective(v, ocfg, reading("3 RESOURCES/First.md", "2 AREAS/Second.md"))
+    agreed, runs = SEM.agree(v, eA, eB)
+    check("two clean readings that agree", pA == pB == [] and runs == [] and len(agreed) == len(SEM.scope(v, ocfg)))
+    plan, rep = SEM.propose(v, ocfg, agreed, runs, today="2026-01-01")
+    check("the plan splits the two mixed notes, moves one, dedupes one",
+          set(rep["split"]) == {"# INBOX/Mixed.md", "# INBOX/Two.md"} and rep["dedupe"] == ["2 AREAS/Aph.md"]
+          and rep["moved"] == {"2 AREAS/Copy A.md": "3 RESOURCES/Copy A.md"})
+    ops = write_plan(os.path.join(tmp9, "plan.tsv"), plan)
+    before = manifest(v)
+    errs, exp, _ = C.simulate(v, ops, before)
+    check("the organ's plan passes the mover's dry run (every line of a split note placed once)", errs == [])
+    if errs: print("     ", errs[:4], plan)
+    orig = {n: open(os.path.join(v, n), "rb").read() for n in ("# INBOX/Mixed.md", "# INBOX/Two.md", "2 AREAS/Aph.md")}
+    undo9 = os.path.join(tmp9, "undo.tsv")
+    ok, f, _ = C.apply_plan(v, ops, before, C._scratch_trash_fn(os.path.join(tmp9, "_t")), undo9)
+    check("apply → GREEN", ok)
+    if not ok: print("     ", f[:6])
+    rd = lambda p: open(os.path.join(v, p), "rb").read()
+    mixed, two = orig["# INBOX/Mixed.md"].splitlines(keepends=True), orig["# INBOX/Two.md"].splitlines(keepends=True)
+    check("each split note is kept whole in the archive",
+          rd("4 ARCHIVE/Mixed — original (2026-01-01).md") == orig["# INBOX/Mixed.md"]
+          and rd("4 ARCHIVE/Two — original (2026-01-01).md") == orig["# INBOX/Two.md"])
+    check("its pieces land verbatim: gathered into existing notes, composed into new ones",
+          rd("3 RESOURCES/Songs.md").endswith(b"".join(mixed[0:3])) and rd("3 RESOURCES/Training.md").endswith(b"".join(mixed[3:]))
+          and rd("3 RESOURCES/Alpha.md") == b"".join(two[0:3]) and rd("2 AREAS/Beta.md") == b"".join(two[3:]))
+    check("dedupe: one copy of the repeated line stays; the original, all three copies, is archived",
+          rd("2 AREAS/Aph.md").decode().count("pleasure of rejection") == 1
+          and rd("4 ARCHIVE/Aph — before dedupe (2026-01-01).md") == orig["2 AREAS/Aph.md"])
+    touched = SEM.converge_targets(ocfg, exp)
+    reread = lambda redo=None: SEM.effective(
+        v, ocfg, [redo if redo and t == redo["note"] else rec(v, t) for t in touched], notes=touched)[0]
+    check("convergence: everything the plan made or moved, read again, needs nothing more",
+          "3 RESOURCES/Alpha.md" in touched and SEM.converge(v, touched, reread(), reread()) == [])
+    again = rec(v, "3 RESOURCES/Alpha.md", dest="2 AREAS/Beta.md")
+    check("convergence red: a second pass that still moves lines → the pass did not close",
+          SEM.converge(v, touched, reread(again), reread()) != [])
+    check("undo restores the vault exactly", C.undo_plan(v, undo9) == [] and C._verify(v, before)[0])
+    eC = SEM.effective(v, ocfg, reading("3 RESOURCES/Alpha.md", "3 RESOURCES/Beta.md"))[0]
+    agreed2, runs2 = SEM.agree(v, eA, eC)
+    plan2, rep2 = SEM.propose(v, ocfg, agreed2, runs2, today="2026-01-01")
+    check("a dispute blocks its note, and every new note it would leave half-made — nothing else",
+          "# INBOX/Two.md" in rep2["blocked"] and "# INBOX/Mixed.md" in rep2["split"]
+          and not any("Two" in x or "Alpha" in x or "Beta" in x for x in plan2))
+finally:
+    shutil.rmtree(tmp9, ignore_errors=True)
+
+print("== synthesize: every paragraph cites a source part, by hash; dedupe keeps only what repeats out ==")
+import hashlib
+tmp10 = tempfile.mkdtemp(prefix="cerebrum-synth-")
+try:
+    v, ocfg = organ_vault(tmp10)
+    songs = open(os.path.join(v, "3 RESOURCES", "Songs.md"), "rb").read()
+    sha12 = hashlib.sha256(SEM.segment(songs)[0]["bytes"]).hexdigest()[:12]
+    n_draft = [0]
+    def draft(body, sources=None):
+        n_draft[0] += 1
+        path = os.path.join(tmp10, f"draft-{n_draft[0]}.md")
+        src = sources if sources is not None else f"- [S1] `3 RESOURCES/Songs.md` P000 sha:{sha12} — “Songwriting”\n"
+        open(path, "w").write(f"# Songs, gathered\n\n{body}\n\n## Sources\n{src}")
+        return path
+    before = manifest(v)
+    good = draft("A song prompt names its verse, chorus and tempo. [S1]")
+    ops = write_plan(os.path.join(tmp10, "p.tsv"), [f"synthesize\t3 RESOURCES/Songs — synthesis.md\t{good}"])
+    check("a synthesis whose every paragraph cites an unchanged source passes the dry run", C.simulate(v, ops, before)[0] == [])
+    undo10 = os.path.join(tmp10, "u.tsv")
+    ok, f, _ = C.apply_plan(v, ops, before, C._scratch_trash_fn(os.path.join(tmp10, "_t")), undo10)
+    check("apply → GREEN; the note is the draft byte for byte; the source untouched",
+          ok and open(os.path.join(v, "3 RESOURCES", "Songs — synthesis.md"), "rb").read() == open(good, "rb").read()
+          and open(os.path.join(v, "3 RESOURCES", "Songs.md"), "rb").read() == songs)
+    check("undo removes exactly the synthesis", C.undo_plan(v, undo10) == [] and C._verify(v, before)[0])
+    refused = lambda path: C.simulate(v, write_plan(os.path.join(tmp10, "q.tsv"), [f"synthesize\t3 RESOURCES/S.md\t{path}"]), before)[0]
+    check("traceability red: a paragraph that cites nothing is a new claim", any("cites nothing" in e for e in refused(
+        draft("A cited claim. [S1]\n\nAn uncited claim, a new one."))))
+    check("traceability red: a source changed since it was cited", any("changed since it was cited" in e for e in refused(
+        draft("A claim. [S1]", f"- [S1] `3 RESOURCES/Songs.md` P000 sha:{'0' * 12}\n"))))
+    check("traceability red: a cited source that is not listed", any("not listed" in e for e in refused(draft("A claim. [S2]"))))
+    check("traceability red: a part that does not exist", any("has no part" in e for e in refused(
+        draft("A claim. [S1]", f"- [S1] `3 RESOURCES/Songs.md` P009 sha:{sha12}\n"))))
+    check("dedupe with nothing repeated is refused", C.simulate(v, write_plan(os.path.join(tmp10, "d.tsv"),
+          ["dedupe\t3 RESOURCES/Songs.md\t4 ARCHIVE/Songs — before dedupe.md"]), before)[0] != [])
+    check("dedupe onto an existing note is refused (no clobber)", C.simulate(v, write_plan(os.path.join(tmp10, "e.tsv"),
+          ["dedupe\t2 AREAS/Aph.md\t4 ARCHIVE/Copy B.md"]), before)[0] != [])
+    new_b, dropped = SEM.dedupe_bytes(open(os.path.join(v, "2 AREAS", "Aph.md"), "rb").read())
+    check("dedupe drops only the later copies — every distinct line survives, once", len(dropped) == 2
+          and new_b.decode().count("pleasure of rejection") == 1 and "sea and the sky" in new_b.decode())
+finally:
+    shutil.rmtree(tmp10, ignore_errors=True)
+
+print("== registry: a live note inside its archived original is not proposed for removal ==")
+s, root, cfg = K._scratch()
+try:
+    big = "\n".join(f"line number {i} with enough words in it" for i in range(30)) + "\n"
+    open(os.path.join(root, "4 ARCHIVE", "Full — original.md"), "w").write(big + "and a line that moved elsewhere\n")
+    open(os.path.join(root, "3 RESOURCES", "Kept part.md"), "w").write(big)
+    out = REG.build(root, cfg)
+    check("it is listed as an original kept in the archive",
+          "`4 ARCHIVE/Full — original.md` holds all of `3 RESOURCES/Kept part.md`" in out)
+    check("  … and not as removable", "`3 RESOURCES/Kept part.md` — 100% inside" not in out)
+finally:
+    shutil.rmtree(s, ignore_errors=True)
+
 print()
 print(f"RESULT: {'ALL PASS' if not fails else 'FAILURES: ' + ', '.join(fails)}")
 sys.exit(1 if fails else 0)

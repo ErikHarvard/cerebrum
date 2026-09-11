@@ -113,8 +113,680 @@ def cmd_segment(rel):
     print(f"           rejoined = the note, byte for byte · {out}")
     return 0
 
+# ==== the semantic organ ======================================================================
+# Triage by local embeddings (they rank, never decide) → a reader's record for every line → two
+# independent readings that must agree → a plan built only from what they agree on. The operators
+# are a paradox audit's: split one note holding several subjects, gather many notes on one subject,
+# mark a boundary — and, first, stand down where two notes are one subject seen from two uses.
+import json, urllib.request
+from collections import defaultdict, Counter
+
+WINDOW, MIN_WORDS = 300, 30        # words per embedding window · below MIN_WORDS a section is read, not ranked
+
+def organ_cfg(cfg):
+    return cfg.get("organ", {})
+
+def sema_dir():
+    d = os.path.join(C.STATE, "sema")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+def scope(vault, cfg):
+    """The notes the organ reads: every movable note, except the generated registry, notes accepted
+    as sensitive (never opened), and the config's organ.exclude."""
+    import checks as K
+    skip = set(cfg.get("accepted", {}).get("sensitive", [])) | set(organ_cfg(cfg).get("exclude", []))
+    if cfg.get("registry"):
+        skip.add(cfg["registry"])
+    v = K.Vault(vault, cfg)
+    vis = set(v.visible)
+    return [p for p in v.movable if p.endswith(".md") and p in vis and p not in skip]
+
+def read_bytes(vault, rel):
+    with open(os.path.join(vault, rel), "rb") as fh:
+        return fh.read()
+
+# ---- repeats inside a note: the one redundancy found without a read --------------------------
+LIST_MARK = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
+
+def line_key(raw):
+    """What makes two lines copies: the same text, ignoring surrounding space and a list marker.
+    Case, punctuation and wording all count — a variant is not a copy."""
+    return re.sub(r"\s+", " ", LIST_MARK.sub("", raw.decode("utf-8", "replace").strip()))
+
+def dedupe_bytes(data):
+    """Keep the first copy of each repeated substantial line (four words or more, not a heading,
+    not inside a code fence); drop the later copies. Returns (new bytes, dropped line numbers)."""
+    seen, out, dropped, fence = set(), [], [], None
+    for i, raw in enumerate(data.splitlines(keepends=True), 1):
+        line = raw.decode("utf-8", "replace").rstrip("\r\n")
+        m = FENCE.match(line)
+        if fence:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
+                fence = None
+            out.append(raw); continue
+        if m:
+            fence = m.group(1); out.append(raw); continue
+        k = line_key(raw)
+        if len(k.split()) >= 4 and not HEADING.match(line):
+            if k in seen:
+                dropped.append(i); continue
+            seen.add(k)
+        out.append(raw)
+    return b"".join(out), dropped
+
+def repeat_lines(data):
+    """{line text: copies} for every substantial line that occurs more than once."""
+    _new, dropped = dedupe_bytes(data)
+    lines = data.splitlines(keepends=True)
+    return dict(Counter(line_key(lines[i - 1]) for i in dropped)) if dropped else {}
+
+# ---- embeddings: local, cached, ordinal -------------------------------------------------------
+def ollama_embed(texts, cfg):
+    oc = organ_cfg(cfg)
+    url = oc.get("embed_url", "http://localhost:11434").rstrip("/") + "/api/embed"
+    out = []
+    for i in range(0, len(texts), 32):
+        req = urllib.request.Request(url, headers={"Content-Type": "application/json"}, data=json.dumps(
+            {"model": oc.get("embed_model", "nomic-embed-text"), "input": texts[i:i + 32]}).encode())
+        with urllib.request.urlopen(req, timeout=600) as r:
+            out += json.load(r)["embeddings"]
+    return out
+
+def fake_embed(texts, cfg=None, dim=64):
+    """A deterministic stand-in for tests: a hashed bag of words. It ranks shared vocabulary —
+    enough for a test, and exactly why a real run uses a real model."""
+    vs = []
+    for t in texts:
+        v = [0.0] * dim
+        for w in re.findall(r"[^\W_]+", t.lower()):
+            v[int(hashlib.md5(w.encode()).hexdigest(), 16) % dim] += 1.0
+        vs.append(v)
+    return vs
+
+def embedder():
+    return fake_embed if os.environ.get("CEREBRUM_EMBED") == "fake" else ollama_embed
+
+def sections_of(data, rel):
+    out = []
+    for p in segment(data):
+        text = p["bytes"].decode("utf-8", "replace")
+        out.append({"note": rel, "pid": p["id"], "start": p["start"], "end": p["end"],
+                    "words": len(text.split()), "sha": hashlib.sha256(p["bytes"]).hexdigest()[:12],
+                    "heading": p["heading"][:80], "text": text})
+    return out
+
+def section_vectors(secs, cfg, embed, cache_path=None):
+    """One unit vector per section — the mean of its windows' embeddings — cached by model and
+    section hash, so an unchanged section is never embedded twice."""
+    import numpy as np
+    model = "fake" if embed is fake_embed else organ_cfg(cfg).get("embed_model", "nomic-embed-text")
+    cache = {}
+    if cache_path and os.path.exists(cache_path):
+        with open(cache_path, encoding="utf-8") as fh:
+            cache = json.load(fh)
+    key = lambda s: f"{model}:{hashlib.sha256(s['text'].encode()).hexdigest()}"
+    todo = list({key(s): s for s in secs if key(s) not in cache}.items())
+    wins, owner = [], []
+    for n, (_k, s) in enumerate(todo):
+        w = s["text"].split()
+        for i in range(0, max(len(w), 1), WINDOW):
+            wins.append("clustering: " + " ".join(w[i:i + WINDOW])); owner.append(n)
+    if wins:
+        vecs, acc = embed(wins, cfg), defaultdict(list)
+        for n, v in zip(owner, vecs):
+            acc[n].append(v)
+        for n, (k, _s) in enumerate(todo):
+            cache[k] = [round(float(x), 5) for x in np.mean(np.array(acc[n], dtype=float), axis=0)]
+        if cache_path:
+            with open(cache_path, "w", encoding="utf-8") as fh:
+                json.dump(cache, fh)
+    M = np.array([cache[key(s)] for s in secs], dtype=float).reshape(len(secs), -1)
+    norm = np.linalg.norm(M, axis=1, keepdims=True)
+    norm[norm == 0] = 1.0
+    return M / norm
+
+# A fixed probe of the model itself: it must rank a paraphrase above an unrelated sentence.
+PROBE = ("Every note goes where it will be used soonest: projects first, then areas, then resources, else the archive.",
+         "File each note in the place you'll need it next — a current project if one fits, otherwise an ongoing "
+         "responsibility, then a topic of interest, and failing all that, storage.",
+         "Deadlift with a neutral spine; brace the core before the bar leaves the floor.")
+
+def index(vault, cfg, embed=None, cache_path=None, top_pairs=150, probe=None):
+    """Triage for the readers: which notes may hold several subjects, which sections of different
+    notes may be one subject, which lines repeat inside a note. Every score only ranks; the
+    readings decide. Two controls: identical copies must find each other at 1.0 (the search
+    looked), and the model must rank a paraphrase above an unrelated sentence (it reads meaning,
+    not only words) — skipped for the test stand-in, which reads only words."""
+    import numpy as np
+    embed = embed or embedder()
+    notes = scope(vault, cfg)
+    num = {rel: n for n, rel in enumerate(notes)}
+    secs, note_sha, reps = [], {}, {}
+    for rel in notes:
+        data = read_bytes(vault, rel)
+        note_sha[rel] = hashlib.sha256(data).hexdigest()
+        secs += sections_of(data, rel)
+        r = repeat_lines(data)
+        if r:
+            reps[rel] = {"lines": len(r), "extra_copies": sum(r.values()),
+                         "top": sorted(r.items(), key=lambda kv: -kv[1])[:5]}
+    big = [s for s in secs if s["words"] >= MIN_WORDS]
+    V = section_vectors(big, cfg, embed, cache_path) if big else np.zeros((0, 1))
+    ref = lambda s: {"note": s["note"], "pid": s["pid"], "heading": s["heading"], "words": s["words"]}
+
+    within, by_note = [], defaultdict(list)          # one note: coherence of its sections to its centroid
+    for k, s in enumerate(big):
+        by_note[s["note"]].append(k)
+    for rel, ks in by_note.items():
+        if len(ks) < 2:
+            continue
+        w = np.array([big[k]["words"] for k in ks], dtype=float)
+        c = (V[ks] * w[:, None]).sum(0)
+        c /= (np.linalg.norm(c) or 1.0)
+        sims = V[ks] @ c
+        within.append({"note": rel, "coherence": round(float((sims * w).sum() / w.sum()), 3),
+                       "sections": len(ks), "words": int(w.sum()),
+                       "farthest": [ref(big[ks[j]]) for j in np.argsort(sims)[:3]]})
+    within.sort(key=lambda x: x["coherence"])
+
+    best = []                                        # across notes: each section's nearest in ANOTHER note
+    nid = np.array([num[s["note"]] for s in big])
+    for a in range(0, len(big), 512):
+        blk = V[a:a + 512] @ V.T
+        blk[nid[a:a + 512][:, None] == nid[None, :]] = -2.0
+        best += [(float(blk[r, j]), a + r, int(j)) for r, j in enumerate(blk.argmax(1))]
+    top_of = {k: (sim, j) for sim, k, j in best}
+    best.sort(key=lambda t: -t[0])
+    across, seen = [], set()
+    for sim, k, j in best:
+        pr = (min(k, j), max(k, j))
+        if sim < -1.5 or pr in seen:
+            continue
+        seen.add(pr)
+        across.append({"sim": round(sim, 3), "a": ref(big[k]), "b": ref(big[j])})
+        if len(across) >= top_pairs:
+            break
+
+    copies = defaultdict(list)
+    for rel, h in note_sha.items():
+        copies[h].append(rel)
+    control = []
+    for g in sorted(sorted(x) for x in copies.values() if len(x) > 1):
+        ks = [k for k, s in enumerate(big) if s["note"] in g]
+        control.append({"copies": g, "sections": len(ks), "found": all(
+            top_of[k][0] >= 0.999 and big[top_of[k][1]]["note"] in g for k in ks) if ks else None})
+    run_probe = (embed is not fake_embed) if probe is None else probe
+    probe = None
+    if run_probe:
+        P = np.array(embed(["clustering: " + t for t in PROBE], cfg), dtype=float)
+        P /= np.linalg.norm(P, axis=1, keepdims=True)
+        probe = {"paraphrase": round(float(P[0] @ P[1]), 3), "unrelated": round(float(P[0] @ P[2]), 3)}
+        probe["ok"] = probe["paraphrase"] > probe["unrelated"]
+    return {"when": C.ts(), "model": "fake" if embed is fake_embed else organ_cfg(cfg).get("embed_model", "nomic-embed-text"),
+            "notes": len(notes), "sections": len(secs), "ranked": len(big), "note_sha": note_sha,
+            "section_list": [{k: v for k, v in s.items() if k != "text"} for s in secs],
+            "within": within, "across": across,
+            "note_pairs": [[a, b, n] for (a, b), n in Counter(tuple(sorted((x["a"]["note"], x["b"]["note"])))
+                                                               for x in across).most_common()],
+            "repeats": reps, "control": control, "probe": probe}
+
+def index_ok(ix):
+    """The index is believed only if every copy group found itself and the model probe passed."""
+    return all(c["found"] is not False for c in ix["control"]) and (ix["probe"] is None or ix["probe"]["ok"])
+
+# ---- a synthesis: traceable, or it is a new claim --------------------------------------------
+SOURCE_LINE = re.compile(r"^- \[(S\d+)\] `([^`]+)` (P\d{3}) sha:([0-9a-f]{12})")
+CITE = re.compile(r"\[(S\d+(?:\s*,\s*S\d+)*)\]")
+RULE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
+
+def check_synthesis(draft, content_of):
+    """Every paragraph of the body cites a source — [S1] or [S1, S3]; every source is listed under
+    '## Sources' as  - [S1] `note path` P012 sha:<12 hex> — …  and that part of that note must still
+    hold exactly those bytes. content_of(path) → the note's bytes, or None. Returns the problems."""
+    text = draft.decode("utf-8", "replace")
+    m = re.search(r"(?m)^##\s+Sources\s*$", text)
+    if not m:
+        return ["no '## Sources' section"]
+    body, foot, probs, srcs, cited = text[:m.start()], text[m.end():], [], {}, set()
+    if body.startswith("---\n"):
+        end = body.find("\n---", 4)
+        body = body[end + 4:] if end >= 0 else body
+    for line in foot.splitlines():
+        if line.strip():
+            mm = SOURCE_LINE.match(line)
+            if not mm:
+                probs.append(f"not a source line: {line[:80]}"); continue
+            if mm.group(1) in srcs:
+                probs.append(f"{mm.group(1)} listed twice")
+            srcs[mm.group(1)] = mm.groups()[1:]
+    for p in re.split(r"\n\s*\n", C._strip_code(body)):
+        claim = [l for l in p.splitlines() if l.strip() and not l.lstrip().startswith("#") and not RULE.match(l)]
+        if not claim:
+            continue                                     # a heading or a rule, not a claim
+        ids = [i.strip() for c in CITE.findall(p) for i in c.split(",")]
+        if not ids:
+            probs.append(f"a paragraph cites nothing: “{claim[0].strip()[:60]}”")
+        cited |= set(ids)
+    probs += [f"{s} is cited but not listed under Sources" for s in sorted(cited - set(srcs))]
+    probs += [f"{s} is listed but never cited" for s in sorted(set(srcs) - cited)]
+    for sid, (path, pid, sha12) in sorted(srcs.items()):
+        data = content_of(path)
+        part = next((q for q in segment(data) if q["id"] == pid), None) if data is not None else None
+        if data is None:
+            probs.append(f"{sid}: no such note: {path}")
+        elif part is None:
+            probs.append(f"{sid}: {path} has no part {pid}")
+        elif hashlib.sha256(part["bytes"]).hexdigest()[:12] != sha12:
+            probs.append(f"{sid}: {path} {pid} changed since it was cited")
+    return probs
+
+# ---- the reading: one record for every line ---------------------------------------------------
+OPS = ("keep", "merge", "synthesize", "mark", "link", "dedupe", "horizon")
+PLACING = ("keep", "merge")              # these put lines somewhere; every other act leaves them where they are
+RELATIONS = ("", "≡", "=", "≅", "≠", "parallax")
+READING_FORMAT = """A reading is JSON lines, one record each:
+  note      the note's vault path            note_sha  sha256 of the note as read — pins the record
+  lines     "*" = every line no other record of this note names; or parts "P003-P010"; or lines "L40-L97"
+  subject   what these lines are about       use       what they are for (project/area/resource/archive …)
+  op        keep | merge | synthesize | mark | link | dedupe | horizon
+  dest      keep, merge: the note they belong in ("" = where they are) · synthesize: the synthesis note
+  relation  merge: ≡ (one text) or = (same claims) · link: ≅ (same structure, another domain) · parallax
+  with      link: the notes it relates to    why       one line: the reason"""
+
+def load_reading(path):
+    """A file of JSON lines, or a folder of them (one per reader's slice)."""
+    files = sorted(os.path.join(path, f) for f in os.listdir(path) if f.endswith(".jsonl")) \
+        if os.path.isdir(path) else [path]
+    recs = []
+    for f in files:
+        with open(f, encoding="utf-8") as fh:
+            for n, line in enumerate(fh, 1):
+                if line.strip():
+                    try:
+                        r = json.loads(line)
+                    except ValueError as e:
+                        r = {"_bad": str(e)}
+                    r["_at"] = f"{os.path.basename(f)}:{n}"
+                    recs.append(r)
+    return recs
+
+def dest_problem(d, cfg):
+    if not d.endswith(".md"):
+        return f"a destination must be a note (.md): {d}"
+    if d.split("/")[0] not in list(cfg.get("para", C.PARA)):
+        return f"a destination must be in a PARA home: {d}"
+    if d.count("/") > 2:
+        return f"deeper than category → container → note: {d}"
+    return f"a destination inside the frozen register: {d}" if C.is_frozen(d) else ""
+
+def validate(r, sha, cfg):
+    op, d, out = r.get("op"), r.get("dest", "") or "", []
+    if r.get("note_sha") != sha:
+        out.append("the note changed since it was read (note_sha differs) — read it again")
+    if op not in OPS:
+        out.append(f"unknown op: {op!r}")
+    if r.get("relation", "") not in RELATIONS:
+        out.append(f"unknown relation: {r.get('relation')!r}")
+    for f in ("subject", "use"):
+        if not str(r.get(f, "")).strip():
+            out.append(f"no {f}")
+    if op == "synthesize" and not d:
+        out.append("synthesize needs dest: the synthesis note")
+    if d and op in PLACING + ("synthesize",) and dest_problem(d, cfg):
+        out.append(dest_problem(d, cfg))
+    if op == "merge" and r.get("relation") not in ("≡", "="):
+        out.append("merge needs relation ≡ or = — ≅ is a link, parallax a keep (PT 9.2)")
+    if op == "link" and not r.get("with"):
+        out.append("link needs with: the notes it relates to")
+    return out
+
+def effective(vault, cfg, recs, notes=None):
+    """Coverage: each line of each note in scope → the one record that places it. A line named by
+    two records, a line nobody read, a record for an older version of its note: each is a problem.
+    Returns (eff {note: {line: record}} for every note read cleanly, problems)."""
+    notes = list(scope(vault, cfg) if notes is None else notes)
+    by_note, probs, inscope = defaultdict(list), [], set(notes)
+    for r in recs:
+        if "_bad" in r:
+            probs.append(f"{r.get('_at', 'a record')}: not JSON: {r['_bad']}")
+        elif r.get("note") not in inscope:
+            probs.append(f"{r.get('_at', 'a record')}: not a note in scope: {r.get('note')!r}")
+        else:
+            by_note[r["note"]].append(r)
+    eff = {}
+    for rel in notes:
+        data = read_bytes(vault, rel)
+        sha, n = hashlib.sha256(data).hexdigest(), len(data.splitlines(keepends=True))
+        if not by_note.get(rel):
+            probs.append(f"not read: {rel}"); continue
+        parts, assign, star, ok = segment(data), {}, [], True
+        for r in by_note[rel]:
+            bad = validate(r, sha, cfg)
+            if bad:
+                probs += [f"{r.get('_at', 'a record')}: {rel}: {b}" for b in bad]; ok = False; continue
+            spec = str(r.get("lines", "*")).strip() or "*"
+            if spec == "*":
+                star.append(r); continue
+            try:
+                ls = [l for a, b in spans(spec, parts) for l in range(a, b + 1)]
+            except (KeyError, ValueError) as e:
+                probs.append(f"{r.get('_at', 'a record')}: {rel}: no such part or line: {e}"); ok = False; continue
+            twice = sorted({l for l in ls if l in assign} | {l for l, c in Counter(ls).items() if c > 1})
+            if any(not 1 <= l <= n for l in ls):
+                probs.append(f"{r.get('_at', 'a record')}: {rel}: lines outside 1–{n}"); ok = False
+            elif twice:
+                probs.append(f"{r.get('_at', 'a record')}: {rel}: L{twice[0]} placed twice"); ok = False
+            else:
+                assign.update({l: r for l in ls})
+        if len(star) > 1:
+            probs.append(f"{rel}: {len(star)} '*' records — at most one"); ok = False
+        rest = [l for l in range(1, n + 1) if l not in assign]
+        if rest and star:
+            assign.update({l: star[0] for l in rest})
+        elif rest:
+            probs.append(f"{rel}: {len(rest)} line(s) not read — the first is L{rest[0]}"); ok = False
+        if ok:
+            eff[rel] = assign
+    return eff, probs
+
+def final_dest(r, rel):
+    return (r.get("dest") or rel) if r["op"] in PLACING else rel
+
+def nonblank(vault, rel):
+    return [i for i, raw in enumerate(read_bytes(vault, rel).splitlines(keepends=True), 1) if raw.strip()]
+
+def _group_ids(eff, nb):
+    """dest → an id for the exact set of non-blank lines placed there; likewise per synthesis note."""
+    place, syn = defaultdict(list), defaultdict(list)
+    for rel, assign in eff.items():
+        for l in nb[rel]:
+            place[final_dest(assign[l], rel)].append((rel, l))
+            if assign[l]["op"] == "synthesize":
+                syn[assign[l]["dest"]].append((rel, l))
+    h = lambda xs: hashlib.sha1(repr(sorted(xs)).encode()).hexdigest()
+    return {d: h(x) for d, x in place.items()}, {d: h(x) for d, x in syn.items()}
+
+def agree(vault, effA, effB):
+    """Line by line — non-blank lines; a blank line follows its neighbours — do two independent
+    readings put it in the same place, with the same act? An existing note is known by its path; a
+    new note has no path yet, so it is known by exactly what it holds: two readers agree on it only
+    if they fill it with the same lines, whatever they call it. Disagreement is the codex's vacuous
+    case — two fixed points, nothing selected — and goes to the keeper, never into a plan.
+    Returns (agreed {note: {line: reader A's record}}, runs of disagreement)."""
+    notes = sorted(set(effA) & set(effB))
+    nb = {rel: nonblank(vault, rel) for rel in notes}
+    gA, sA = _group_ids({r: effA[r] for r in notes}, nb)
+    gB, sB = _group_ids({r: effB[r] for r in notes}, nb)
+    def act(r, rel, g, s):
+        d = final_dest(r, rel)
+        where = ("path", d) if os.path.isfile(os.path.join(vault, d)) else ("new", os.path.dirname(d), g[d])
+        return (where, "" if r["op"] in PLACING else r["op"],
+                s.get(r["dest"]) if r["op"] == "synthesize" else None,
+                "≡" if r["op"] == "merge" and r.get("relation") == "≡" else "",
+                tuple(sorted(r.get("with", []))) if r["op"] == "link" else ())
+    agreed, runs = {}, []
+    for rel in notes:
+        agreed[rel], cur = {}, None
+        for l in nb[rel]:
+            a, b = effA[rel][l], effB[rel][l]
+            if act(a, rel, gA, sA) == act(b, rel, gB, sB):
+                agreed[rel][l], cur = a, None
+            elif cur and cur["a"] is a and cur["b"] is b:
+                cur["last"] = l
+            else:
+                cur = {"note": rel, "first": l, "last": l, "a": a, "b": b}
+                runs.append(cur)
+    return agreed, runs
+
+# ---- the proposal: a plan made only of what both readings agree on ------------------------------
+def _spec(lines):
+    runs = []
+    for l in sorted(lines):
+        if runs and l == runs[-1][1] + 1:
+            runs[-1][1] = l
+        else:
+            runs.append([l, l])
+    return ",".join(f"L{a}-L{b}" if a != b else f"L{a}" for a, b in runs)
+
+def propose(vault, cfg, agreed, runs, today=None):
+    """Turn agreed lines into a plan the mover can prove. A note acts only if every non-blank line of
+    it is agreed; a new note is made only if no line meant for it is under dispute; nothing lands in a
+    note under dispute. A note whose lines go to more than one place, or into a note that is not
+    new, is archived whole first ('<name> — original (<date>)') and partitioned from there: every line
+    placed exactly once, the original kept. Returns (plan lines, report)."""
+    today = today or C.datetime.now().strftime("%Y-%m-%d")
+    arch = list(cfg.get("para", C.PARA))[-1]
+    exists = lambda p: os.path.lexists(os.path.join(vault, p))
+    data = {rel: read_bytes(vault, rel) for rel in agreed}
+    nb = {rel: nonblank(vault, rel) for rel in agreed}
+    blocked = {r["note"] for r in runs}
+    feeders = defaultdict(set)                      # dest → notes whose agreed lines go there
+    for rel in agreed:
+        for l, r in agreed[rel].items():
+            feeders[final_dest(r, rel)].add(rel)
+    while True:                                     # a dispute blocks every note it would leave half-done
+        bad = set()
+        for d, fs in feeders.items():
+            if d in blocked or (exists(d) and d not in agreed) or (not exists(d) and fs & blocked):
+                bad |= fs - blocked
+        if not bad:
+            break
+        blocked |= bad
+    place = {}                                      # every line → its final note; a blank line follows its neighbour
+    for rel in sorted(set(agreed) - blocked):
+        n, fd, last = len(data[rel].splitlines(keepends=True)), {l: final_dest(agreed[rel][l], rel) for l in nb[rel]}, None
+        first = fd[nb[rel][0]] if nb[rel] else rel
+        place[rel] = {}
+        for l in range(1, n + 1):
+            last = fd.get(l, last)
+            place[rel][l] = last or first
+    contrib, order = defaultdict(list), []          # dest → [(note, lines)] in note order
+    for rel in sorted(place):
+        byd = defaultdict(list)
+        for l, d in place[rel].items():
+            byd[d].append(l)
+        for d, ls in byd.items():
+            order += [] if d in contrib else [d]
+            contrib[d].append((rel, ls))
+    moved, dissolved, used = {}, {}, set()
+    for rel in sorted(place):
+        ds = set(place[rel].values())
+        if ds == {rel}:
+            continue
+        d = next(iter(ds))
+        if len(ds) == 1 and not exists(d) and contrib[d][0][0] == rel:
+            moved[rel] = d; continue
+        stem, k = os.path.splitext(os.path.basename(rel))[0], 1
+        arc = f"{arch}/{stem} — original ({today}).md"
+        while exists(arc) or arc in used:
+            k += 1; arc = f"{arch}/{stem} — original ({today}) {k}.md"
+        used.add(arc); dissolved[rel] = arc
+    plan, made = [], set()
+    def mkdirs(p):
+        segs = os.path.dirname(p).split("/")
+        for i in range(1, len(segs) + 1):
+            d = "/".join(segs[:i])
+            if d and not os.path.isdir(os.path.join(vault, d)) and d not in made:
+                made.add(d); plan.append(f"mkdir\t{d}")
+    for rel, arc in dissolved.items():
+        mkdirs(arc); plan += [f"mv\t{rel}\t{arc}", f"partition\t{arc}\t{hashlib.sha256(data[rel]).hexdigest()}"]
+    for rel, d in moved.items():
+        mkdirs(d); plan.append(f"mv\t{rel}\t{d}")
+    gathered = {}
+    for d in order:
+        live, first = exists(d) and d not in dissolved and d not in moved, True
+        for rel, ls in contrib[d]:
+            if (rel == d and rel not in dissolved) or moved.get(rel) == d:
+                first = False; continue             # already there: its own lines, or the note itself moved in
+            if first and not live:
+                mkdirs(d)
+            plan.append(f"{'extend' if live or not first else 'compose'}\t{d}\t{dissolved[rel]}\t{_spec(ls)}")
+            first = False
+        if len(contrib[d]) > 1:
+            gathered[d] = [(rel, len(ls)) for rel, ls in contrib[d]]
+    dedupe = [rel for rel in place if set(place[rel].values()) == {rel}
+              and any(agreed[rel][l]["op"] == "dedupe" for l in nb[rel])]
+    for rel in dedupe:
+        plan.append(f"dedupe\t{rel}\t{arch}/{os.path.splitext(os.path.basename(rel))[0]} — before dedupe ({today}).md")
+    acts = defaultdict(list)                        # the acts that need a person, not a mover
+    for rel in place:
+        seen = set()
+        for l in nb[rel]:
+            r = agreed[rel][l]
+            if r["op"] in ("synthesize", "mark", "link", "horizon") and id(r) not in seen:
+                seen.add(id(r)); acts[r["op"]].append((rel, r))
+    names = defaultdict(set)
+    for p in C.rels(vault):
+        if p.endswith(".md") and p not in dissolved and p not in moved:
+            names[os.path.basename(p).lower()].add(p)
+    clash = sorted(d for d in order if not exists(d) and names.get(os.path.basename(d).lower(), set()) - {d})
+    return plan, {"moved": moved, "split": {rel: sorted({d for d in place[rel].values()}) for rel in dissolved},
+                  "gathered": gathered, "dedupe": dedupe, "acts": dict(acts), "blocked": sorted(blocked),
+                  "disputes": runs, "acting": sorted(place), "name_clashes": clash,
+                  "parallax": sum(1 for rel in place for r in {id(x): x for x in agreed[rel].values()}.values()
+                                  if r.get("relation") == "parallax")}
+
+# ---- convergence: the pass closes, or it did not ---------------------------------------------
+def converge_targets(cfg, expect):
+    """Every note a plan made, changed or moved — outside the archive, which keeps originals."""
+    arch = list(cfg.get("para", C.PARA))[-1]
+    ps = list(expect.get("added", {})) + list(expect.get("hashes", {})) + list(expect.get("moves", {}).values())
+    return sorted({p for p in ps if p.endswith(".md") and p.split("/")[0] != arch})
+
+def converge(vault, touched, effA, effB):
+    """Read again by both readers, each touched note must come back placed where it is: nothing to
+    split, gather, move or rewrite (∂ = 1; the Shadow Law's postcondition). More work on a second
+    pass means the first did not close — a merge that made a note of two subjects fails here."""
+    probs = []
+    for t in touched:
+        for name, eff in (("A", effA), ("B", effB)):
+            if t not in eff:
+                probs.append(f"reader {name} has not read {t} again"); continue
+            for l in nonblank(vault, t):
+                r = eff[t][l]
+                if r["op"] not in ("keep", "link") or final_dest(r, t) != t:
+                    probs.append(f"reader {name}: {t} L{l} — still {r['op']} → {final_dest(r, t)}"); break
+    return probs
+
+# ---- what a person reads ---------------------------------------------------------------------
+def index_md(ix):
+    L = [f"# Organ index — {ix['when']}", "", f"{ix['notes']} notes · {ix['sections']} sections · {ix['ranked']} ranked "
+         f"(≥ {MIN_WORDS} words) · model `{ix['model']}`. Scores only rank; the readings decide.", "", "## Controls", ""]
+    L += [f"- copies {' = '.join(c['copies'])}: " + {True: "found each other", False: "NOT FOUND — do not trust this index",
+                                                        None: "too short to rank"}[c["found"]] for c in ix["control"]]
+    if ix["probe"]:
+        L.append(f"- model probe: paraphrase {ix['probe']['paraphrase']} vs unrelated {ix['probe']['unrelated']} — "
+                 + ("OK" if ix["probe"]["ok"] else "FAILED"))
+    L += ["", "## Notes that may hold several subjects — least coherent first", ""]
+    L += [f"- {w['coherence']:.3f} · `{w['note']}` ({w['sections']} sections, {w['words']:,} words) — farthest: "
+          + ", ".join(f"{f['pid']} “{f['heading']}”" for f in w["farthest"]) for w in ix["within"][:40]]
+    L += ["", "## Sections that may be one subject in two notes — strongest first", ""]
+    L += [f"- {x['sim']:.3f} · `{x['a']['note']}` {x['a']['pid']} “{x['a']['heading']}” ↔ `{x['b']['note']}` "
+          f"{x['b']['pid']} “{x['b']['heading']}”" for x in ix["across"][:80]]
+    L += ["", "## Lines repeated inside a note", ""]
+    L += [f"- `{rel}` — {r['lines']} line(s), {r['extra_copies']} extra copies"
+          for rel, r in sorted(ix["repeats"].items(), key=lambda kv: -kv[1]["extra_copies"])]
+    return "\n".join(L) + "\n"
+
+def proposal_md(rep, plan_path, errors, agreed_lines, total_lines):
+    q = lambda p: f"`{p}`"
+    L = [f"# The organ's proposal — {C.datetime.now():%Y-%m-%d}", "",
+         f"Read twice, independently: {agreed_lines:,} of {total_lines:,} lines agreed. {len(rep['acting'])} notes act; "
+         f"{len(rep['blocked'])} wait for the keeper. Plan: {q(plan_path)} — dry run "
+         + ("OK." if not errors else f"REFUSED ({len(errors)})."), ""] + [f"- ERROR {e}" for e in errors[:20]]
+    def sec(title, rows, cap=300):
+        L.extend(["", f"## {title}", ""] + (rows[:cap] or ["- none"]) + ([f"- … {len(rows) - cap} more"] if len(rows) > cap else []))
+    sec("Split (∂) — one note held several subjects; its original is kept whole in the archive",
+        [f"- {q(r)} → " + " · ".join(q(d) for d in ds) for r, ds in sorted(rep["split"].items())])
+    sec("Gathered (γ) — one subject, from several notes, into one",
+        [f"- {q(d)} ← " + " · ".join(f"{q(r)} ({n} lines)" for r, n in fs) for d, fs in sorted(rep["gathered"].items())])
+    sec("Moved", [f"- {q(r)} → {q(d)}" for r, d in sorted(rep["moved"].items())])
+    sec("Repeats removed — the original kept whole in the archive", [f"- {q(r)}" for r in sorted(rep["dedupe"])])
+    for op, title in (("synthesize", "Syntheses proposed — written after you ratify; the sources stay"),
+                      ("mark", "Boundaries to mark (δ)"), ("link", "Links (≅) — one structure in two domains: never merged"),
+                      ("horizon", "The readers could not tell (horizon)")):
+        sec(title, [f"- {q(r)} {x.get('lines', '*')} — {x.get('dest') or ', '.join(x.get('with', []))} — {x.get('why', '')}"
+                    for r, x in rep["acts"].get(op, [])])
+    sec("Name clashes — a new note would share its name with another", [f"- {q(d)}" for d in rep["name_clashes"]])
+    sec("The keeper's list — the two readings disagree, so nothing is selected",
+        [f"- {q(x['note'])} L{x['first']}–L{x['last']} — A: {x['a']['op']} → {x['a'].get('dest') or 'here'} "
+         f"({x['a'].get('why', '')}) · B: {x['b']['op']} → {x['b'].get('dest') or 'here'} ({x['b'].get('why', '')})"
+         for x in rep["disputes"]])
+    L += ["", f"Parallax — kept apart on purpose: {rep['parallax']} record(s)."]
+    return "\n".join(L) + "\n"
+
+USAGE = """semantics.py — the semantic organ
+  segment  "<note>"          the note's parts → state/parts-<name>.tsv
+  parts    "<note>"          print the note's sha and parts (what a reader cites)
+  index                      triage: sections + local embeddings → state/sema/index-<ts>.{json,md}
+  reading  <A>               coverage of one reading (a .jsonl file, or a folder of them)
+  propose  <A> <B>           coverage of both → agreement → plan + proposal in state/sema/ → dry run
+  converge <expect.json> <A> <B>   after a plan ran: its notes, read again, must need nothing more
+"""
+
+def main(argv):
+    V, cfg = C.VAULT, C.CFG
+    if argv[:1] == ["segment"] and len(argv) == 2:
+        return cmd_segment(argv[1])
+    if argv[:1] == ["parts"] and len(argv) == 2:
+        data = read_bytes(V, argv[1])
+        print(f"{argv[1]}\tnote_sha {hashlib.sha256(data).hexdigest()}\t{len(data.splitlines())} lines")
+        for p in segment(data):
+            print(f"{p['id']}\tL{p['start']}-L{p['end']}\t{len(p['bytes'].split())} words\t{p['heading'][:70]}")
+        return 0
+    if argv == ["index"]:
+        ix, stamp = index(V, cfg, cache_path=os.path.join(sema_dir(), "embeddings.json")), C.ts()
+        base = os.path.join(sema_dir(), f"index-{stamp}")
+        with open(base + ".json", "w", encoding="utf-8") as fh:
+            json.dump(ix, fh, ensure_ascii=False, indent=1)
+        with open(base + ".md", "w", encoding="utf-8") as fh:
+            fh.write(index_md(ix))
+        print(f"index    : {ix['notes']} notes · {ix['sections']} sections · {ix['ranked']} ranked → {base}.md")
+        print("           controls: " + ("PASS" if index_ok(ix) else "FAIL — do not trust this index"))
+        return 0 if index_ok(ix) else 1
+    if argv[:1] == ["reading"] and len(argv) == 2:
+        eff, probs = effective(V, cfg, load_reading(argv[1]))
+        print(f"reading  : {len(eff)} notes read cleanly · {len(probs)} problem(s)")
+        for p in probs[:40]:
+            print("   " + p)
+        return 0 if not probs else 1
+    if argv[:1] == ["propose"] and len(argv) == 3:
+        effs = []
+        for path in argv[1:]:
+            eff, probs = effective(V, cfg, load_reading(path))
+            print(f"coverage : {path} — " + ("every line placed once" if not probs else f"{len(probs)} problem(s)"))
+            for p in probs[:20]:
+                print("   " + p)
+            if probs:
+                return 1
+            effs.append(eff)
+        agreed, runs = agree(V, *effs)
+        plan, rep = propose(V, cfg, agreed, runs)
+        base = os.path.join(sema_dir(), f"proposal-{C.ts()}")
+        with open(base + ".tsv", "w", encoding="utf-8") as fh:
+            fh.write("# the organ's plan — proposed, NOT ratified\n" + "".join(l + "\n" for l in plan))
+        errors = C.simulate(V, C.load_plan(base + ".tsv"), C.manifest_rows(V))[0] if plan else []
+        total = sum(len(nonblank(V, r)) for r in agreed)
+        with open(base + ".md", "w", encoding="utf-8") as fh:
+            fh.write(proposal_md(rep, base + ".tsv", errors, sum(len(a) for a in agreed.values()), total))
+        with open(base + ".json", "w", encoding="utf-8") as fh:
+            json.dump(rep, fh, ensure_ascii=False, indent=1, default=str)
+        print(f"propose  : {len(runs)} dispute(s) · {len(plan)} plan line(s) · dry run "
+              + ("OK" if not errors else f"REFUSED ({len(errors)})") + f" → {base}.md")
+        return 0 if not errors else 1
+    if argv[:1] == ["converge"] and len(argv) == 4:
+        with open(argv[1], encoding="utf-8") as fh:
+            touched = converge_targets(cfg, json.load(fh))
+        effA, pA = effective(V, cfg, load_reading(argv[2]), notes=touched)
+        effB, pB = effective(V, cfg, load_reading(argv[3]), notes=touched)
+        probs = pA + pB + converge(V, touched, effA, effB)
+        print(f"converge : {len(touched)} note(s) the plan touched · " + ("CLOSED — nothing more to do" if not probs else "OPEN"))
+        for p in probs[:40]:
+            print("   " + p)
+        return 0 if not probs else 1
+    print(USAGE + "\n" + READING_FORMAT)
+    return 2
+
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "segment":
-        sys.exit(cmd_segment(sys.argv[2]))
-    print(__doc__)
-    sys.exit(2)
+    sys.exit(main(sys.argv[1:]))

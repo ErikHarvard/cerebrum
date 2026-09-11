@@ -119,10 +119,15 @@ def build(root, cfg):
            "**Identical copies** — keep one of each when you decide:"]
     md += [f"- " + " = ".join(f"`{cell(x)}`" for x in g) + (" (accepted)" if set(g) <= accepted else "")
            for g in groups] or ["- none"]
-    rem = sorted(p for p, (f, q) in contained.items() if f >= 0.99)
+    # a live note wholly inside an ARCHIVED one is not redundant: the archive keeps its fuller original
+    arch = lambda p: p.split("/")[0] == v.para[-1]
+    orig = sorted(p for p, (f, q) in contained.items() if f >= 0.99 and not arch(p) and arch(q))
+    rem = sorted(p for p, (f, q) in contained.items() if f >= 0.99 and p not in orig)
     cand = sorted(p for p, (f, q) in contained.items() if f < 0.99)
     md += ["", "**Fully contained in another note** — removable when you say:"]
     md += [f"- `{cell(p)}` — {contained[p][0]:.0%} inside `{cell(contained[p][1])}`" for p in rem] or ["- none"]
+    md += ["", "**Originals kept in the archive** — a live note wholly inside its fuller original; nothing to remove:"]
+    md += [f"- `{cell(contained[p][1])}` holds all of `{cell(p)}`" for p in orig] or ["- none"]
     md += ["", "**Overlapping** — merge candidates:"]
     md += [f"- `{cell(p)}` — {contained[p][0]:.0%} inside `{cell(contained[p][1])}`" for p in cand] or ["- none"]
     md += ["", "**Carried-out plans** — done; archive when you like:"]

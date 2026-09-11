@@ -73,6 +73,23 @@ Moving whole notes organizes where they sit; `semantics.py` organizes what they 
 
 What no tool can check is whether a piece was placed *well* — that is meaning, and it stays with the reader who proposed the plan and the person who approves it.
 
+## The semantic organ
+
+Word matching finds copies; it cannot see the same idea in other words, or one note holding several subjects. The organ reads for meaning, and proves the form of what it proposes. Its operators come from a paradox audit: **split** one note holding several subjects, **gather** several notes on one subject, **mark** a boundary — and, before any of these, **stand down** where two notes are one subject seen from two uses (a source and its summary): nothing is mistyped there, so nothing merges. Before any merge, the relation is named: an identical copy (≡) is trashed, the same claims in other words (=) are merged, the same structure in another domain (≅) is linked — never merged.
+
+```sh
+python3 semantics.py index                 # triage: sections + local embeddings → candidates (ranks only)
+python3 semantics.py parts "<note>"        # the note's hash and parts, for a reader to cite
+python3 semantics.py reading <A>           # coverage: every line of every note placed exactly once
+python3 semantics.py propose <A> <B>       # two independent readings → agreement → a plan + a proposal
+python3 semantics.py converge <expect.json> <A> <B>   # after the plan ran: nothing more to do, or it didn't close
+```
+
+- **Two readings, independently.** A reading is JSON lines: for each run of lines, what it is about, what it is for, and where it belongs (`python3 semantics.py` prints the format). A plan is built only from lines both readings place the same way; a new note is known by exactly what it holds, not by what a reader calls it. Where they disagree, nothing is selected — the lines go to the keeper.
+- **Nothing is lost.** A note whose lines go to more than one place is archived whole first, then partitioned: every line placed exactly once. Sources stay until a person removes them.
+- **Gates, each with a planted defect it must catch:** coverage, agreement, traceability (every paragraph of a synthesis cites the source parts it came from, by hash), lossless verify, and convergence (the notes a plan touched, read again, need nothing more).
+- **Triage is ordinal.** The index needs numpy and a local embedding model (ollama's `nomic-embed-text` by default; set `organ.embed_model` in `cerebrum.json`). Its scores only rank candidates for the readers. Two controls: identical copies must find each other, and the model must rank a paraphrase above an unrelated sentence. Notes accepted as sensitive are never read.
+
 ## Tests
 
 ```sh
