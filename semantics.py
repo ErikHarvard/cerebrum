@@ -1346,6 +1346,8 @@ def cmd_propose(V, cfg, argv):
             print("   " + p)
         if probs:
             return 1
+        for x in ruled:
+            C.ledger("intake", event="ruling", note=x["note"], reader=x["reader"], why=x["why"], by="the keeper", rulings=argv[4])
     agreed, runs, act_runs = agree_detail(V, effA, effB)
     plan, rep = propose(V, cfg, agreed, runs)
     rep["act_disputes"], rep["rulings"] = act_runs, ruled

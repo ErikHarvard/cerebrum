@@ -33,14 +33,12 @@ def log(msg):
 LEDGER_DIR = os.path.join(C.STATE, "ledger")
 
 def ledger(kind, **rec):
-    """One JSON line per event in state/ledger/<kind>.jsonl — intake (capture · place · ratify · undo) and
-    retrieval (ask). Rendered into the vault by `cerebrum.py registry` as ARCHIVUM CEREBRI, so the vault
-    can say what came in, where it went and why, and what went out as a copy and why, without the Builder."""
-    os.makedirs(LEDGER_DIR, exist_ok=True)
-    rec = {"when": datetime.now().isoformat(timespec="seconds"), **rec}
-    with open(os.path.join(LEDGER_DIR, f"{kind}.jsonl"), "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
-    return rec
+    """The Builder's ledger (cerebrum.ledger), directed at LEDGER_DIR so tests can point it elsewhere."""
+    real = C.STATE
+    try:
+        C.STATE = os.path.dirname(LEDGER_DIR); return C.ledger(kind, **rec)
+    finally:
+        C.STATE = real
 
 # ---- the model ----------------------------------------------------------------------------------
 def llm(messages, temperature=0.2, max_tokens=700, seed=None, url=None):
@@ -290,6 +288,9 @@ def place_note(vault, cfg, note, url=None, say=lambda *_: None):
             A, B = A + a2, B + b2
         r = S.intake(vault, cfg, note, A, B)
     r["shortlist"] = sl; r["readers"] = {"A": A, "B": B}
+    if r["status"] == "DISPUTE":
+        ledger("intake", event="dispute", note=note, runs=[{"lines": f"L{d['first']}-L{d['last']}", "A": S.final_dest(d["a"], note), "B": S.final_dest(d["b"], note),
+                                                              "A_why": d["a"].get("why", ""), "B_why": d["b"].get("why", "")} for d in r.get("disputes", [])])
     if r["status"] == "PLAN":
         os.makedirs(S.sema_dir(), exist_ok=True)
         p = os.path.join(S.sema_dir(), f"intake-{C.ts()}.tsv")

@@ -1266,11 +1266,16 @@ try:
         AR.ledger("intake", event="place", note="# INBOX/X.md", status="PLAN", plan="p.tsv", shortlist=[("3 RESOURCES/Songs.md", 0.5)],
                   readers={"A": [{"lines": "*", "op": "keep", "dest": "3 RESOURCES/Songs.md", "at": "", "why": "same songs"}], "B": []}, plan_lines=["mv\ta\tb"])
         AR.ledger("retrieval", event="ask", question="what?", answer="/x/answer-1.md", model="m", url="u", passages=[{"note": "3 RESOURCES/Songs.md", "pid": "P000", "lines": "L1-L3", "heading": "Songwriting", "sim": 0.7}], why="nearest by meaning")
-        check("ledger lines are appended as JSON with a time", len(open(os.path.join(tmp25, "ledger", "intake.jsonl")).read().splitlines()) == 2)
+        AR.ledger("intake", event="ruling", note="# INBOX/X.md", reader="A", why="the keeper says A", by="the keeper", rulings="r.tsv")
+        AR.ledger("intake", event="dispute", note="# INBOX/Y.md", runs=[{"lines": "L1-L3", "A": "3 RESOURCES/Songs.md", "B": "3 RESOURCES/Training.md", "A_why": "songs", "B_why": "lifting"}])
+        AR.ledger("intake", event="undo", log="/x/undo-1.tsv", by="the keeper's word", notes=[], ops=[["mv", "a", "b"]])
+        check("ledger lines are appended as JSON with a time", len(open(os.path.join(tmp25, "ledger", "intake.jsonl")).read().splitlines()) == 5)
         REG.write(v, cfg)
         arch = open(os.path.join(v, "2 AREAS/META/ARCHIVUM.md"), encoding="utf-8").read()
         check("ARCHIVUM renders the capture, the placement with the readers' why, and the retrieval with its passages",
-              "capture" in arch and "same songs" in arch and "Songs.md" in arch and "answer-1.md" in arch and "Intake — 2 event(s)" in arch and "Retrieval — 1 event(s)" in arch)
+              "capture" in arch and "same songs" in arch and "Songs.md" in arch and "answer-1.md" in arch and "Intake — 5 event(s)" in arch and "Retrieval — 1 event(s)" in arch)
+        check("… and the ruling, the dispute with both readers' reasons, the undo, and the most-retrieved list",
+              "the keeper says A" in arch and "A → `3 RESOURCES/Songs.md` · B → `3 RESOURCES/Training.md`" in arch and "undo-1.tsv" in arch and "Most retrieved" in arch and "in 1 answer(s)" in arch)
         check("registry and archivum are fresh together, and the registry leaves the archivum out of what it counts",
               REG.fresh(v, cfg) and "ARCHIVUM" not in open(os.path.join(v, "2 AREAS/META/REG.md"), encoding="utf-8").read().replace("ARCHIVUM CEREBRI", ""))
         open(os.path.join(v, "2 AREAS/META/ARCHIVUM.md"), "a").write("a line nobody generated\n")

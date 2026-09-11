@@ -1085,6 +1085,15 @@ def rehearsal_missing(plan_path, state):
         return f"the rehearsal on record FAILED ({r.get('when')})"
     return ""
 
+def ledger(kind, **rec):
+    """One JSON line per event in STATE/ledger/<kind>.jsonl — intake (capture · place · ruling · ratify · undo) and
+    retrieval (ask). Rendered into the vault by `registry --write` as ARCHIVUM CEREBRI."""
+    d = os.path.join(STATE, "ledger"); os.makedirs(d, exist_ok=True)
+    rec = {"when": datetime.now().isoformat(timespec="seconds"), **rec}
+    with open(os.path.join(d, f"{kind}.jsonl"), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+    return rec
+
 def snapshot_stale(snaps, state):
     """§VII.1: a snapshot taken since the last pass must exist before a plan runs. Returns the
     reason it may not run, or "" when a snapshot is newer than every undo map."""
@@ -1169,6 +1178,8 @@ def cmd_undo(a):
     if real and _obsidian_running():
         print("undo: refused. Close Obsidian first."); return 2
     notes = undo_plan(VAULT, a.log, trash_fn=_trash if real else None)
+    ledger("intake", event="undo", log=os.path.abspath(a.log), by="the keeper's word", notes=notes,
+           ops=[l.split("\t")[1:4] for l in open(a.log, encoding="utf-8").read().splitlines() if l.split("\t")[1:2] not in (["plan-begin"], ["plan-end"], ["trashed-to"])])
     print("undo     : done" + (" — with notes:" if notes else ""))
     for n in notes:
         print("   " + n)

@@ -174,6 +174,14 @@ def build_archivum(root, cfg):
             elif r.get("event") == "ratify":
                 ops = "; ".join(" → ".join(o[:3]) for o in r.get("ops", [])[:6])
                 md.append(f"| {r['when'][:16]} | ratify → {r.get('verify')} | `{os.path.basename(r['plan'])}` | {ops} | {r.get('by')} | undo `{os.path.basename(r.get('undo',''))}` |")
+            elif r.get("event") == "ruling":
+                md.append(f"| {r['when'][:16]} | ruling | `{r['note']}` | reader {r.get('reader')}'s reading stands | {r.get('by')} | {r.get('why','')[:120]} |")
+            elif r.get("event") == "dispute":
+                runs = "; ".join(f"{x['lines']}: A → `{x['A']}` · B → `{x['B']}`" for x in r.get("runs", [])[:3])
+                md.append(f"| {r['when'][:16]} | dispute | `{r['note']}` | {runs} | the keeper decides | A: {'; '.join(x['A_why'][:60] for x in r.get('runs', [])[:2])} · B: {'; '.join(x['B_why'][:60] for x in r.get('runs', [])[:2])} |")
+            elif r.get("event") == "undo":
+                ops = "; ".join(" → ".join(o[:3]) for o in r.get("ops", [])[:6])
+                md.append(f"| {r['when'][:16]} | undo{' — with notes' if r.get('notes') else ''} | `{os.path.basename(r.get('log',''))}` | reversed: {ops} | {r.get('by')} | {'; '.join(r.get('notes', []))[:120]} |")
             else:
                 md.append(f"| {r['when'][:16]} | {r.get('event')} | | | | |")
     retrieval = _ledger_rows("retrieval")
@@ -184,6 +192,10 @@ def build_archivum(root, cfg):
             r = dict(r, when=r.get("when_logged") or r["when"])
             ps = "; ".join(f"`{p['note']}` {p['pid']} ({p['sim']})" for p in r.get("passages", [])[:4])
             md.append(f"| {r['when'][:16]} | {r['question'][:100]} | {ps} | `{os.path.basename(r['answer'])}` | {r.get('why','')[:90]} |")
+    if retrieval:
+        from collections import Counter
+        cnt = Counter(p["note"] for r in retrieval for p in r.get("passages", []))
+        md += ["", "## Most retrieved — what the vault actually serves", ""] + [f"- `{n}` — in {k} answer(s)" for n, k in cnt.most_common(12)]
     return "\n".join(md) + "\n"
 
 def write(root, cfg):
