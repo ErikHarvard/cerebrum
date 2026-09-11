@@ -1,0 +1,9 @@
+{
+  "id": "archivist",
+  "name": "The Archivist",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "The vault's own organ, reached from inside Obsidian: send a selection or a note to the Archivist (captured to the inbox, placed by meaning, ratified by you), open its page in a pane, ask it a question. Writes nothing itself.",
+  "author": "cerebrum",
+  "isDesktopOnly": true
+}
