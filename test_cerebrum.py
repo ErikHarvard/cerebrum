@@ -992,6 +992,31 @@ try:
 finally:
     shutil.rmtree(tmp18, ignore_errors=True)
 
+print("== intake: one new note — an unread destination is READ, never a silent empty plan ==")
+tmp19 = tempfile.mkdtemp(prefix="cerebrum-intake-")
+try:
+    v, ocfg = organ_vault(tmp19)
+    new_note = "# INBOX/Captured.md"; open(os.path.join(v, "# INBOX", "Captured.md"), "w").write(f"# Verse\n{SUNO} a new verse\n")
+    A = [rec(v, new_note, "*", dest="3 RESOURCES/Songs.md")]; B = [rec(v, new_note, "*", dest="3 RESOURCES/Songs.md")]
+    r = SEM.intake(v, ocfg, new_note, A, B, today="2026-01-01")
+    check("both place it into an existing note nobody read → READ, naming that note", r["status"] == "READ" and r["must_read"] == ["3 RESOURCES/Songs.md"])
+    A2, B2 = A + [rec(v, "3 RESOURCES/Songs.md")], B + [rec(v, "3 RESOURCES/Songs.md")]
+    r = SEM.intake(v, ocfg, new_note, A2, B2, today="2026-01-01")
+    check("both read the destination too → PLAN: the note archived and its lines appended into the destination",
+          r["status"] == "PLAN" and any(l.startswith("extend\t3 RESOURCES/Songs.md\t") for l in r["plan"])
+          and any(l.startswith("mv\t# INBOX/Captured.md\t4 ARCHIVE/") for l in r["plan"])
+          and C.simulate(v, write_plan(os.path.join(tmp19, "p.tsv"), r["plan"]), manifest(v))[0] == [])
+    r = SEM.intake(v, ocfg, new_note, A2, [rec(v, new_note, "*", dest="3 RESOURCES/Training.md"), rec(v, "3 RESOURCES/Songs.md"), rec(v, "3 RESOURCES/Training.md")], today="2026-01-01")
+    check("the readers disagree on where → DISPUTE, never a plan", r["status"] == "DISPUTE" and "plan" not in r)
+    r = SEM.intake(v, ocfg, new_note, [rec(v, new_note)], [rec(v, new_note)], today="2026-01-01")
+    check("both keep it where it is → STAYS", r["status"] == "STAYS")
+    r = SEM.intake(v, ocfg, new_note, A2, [], today="2026-01-01")
+    check("a reader who did not read it → PROBLEM", r["status"] == "PROBLEM")
+    r = SEM.intake(v, ocfg, new_note, [rec(v, new_note, "*", dest="2 AREAS/New Verse.md")], [rec(v, new_note, "*", dest="2 AREAS/New Verse.md")], today="2026-01-01")
+    check("both place it as a new note in a folder → PLAN: a move", r["status"] == "PLAN" and r["plan"] == ["mv\t# INBOX/Captured.md\t2 AREAS/New Verse.md"])
+finally:
+    shutil.rmtree(tmp19, ignore_errors=True)
+
 print("== registry: a live note inside its archived original is not proposed for removal ==")
 s, root, cfg = K._scratch()
 try:

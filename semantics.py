@@ -984,6 +984,63 @@ def converge(vault, touched, effA, effB):
                     probs.append(f"reader {name}: {t} L{l} — still {r['op']} → {final_dest(r, t)}"); break
     return probs
 
+# ---- intake: one new note, read by two, placed by agreement — or told exactly what is missing ---
+def intake(vault, cfg, note, recsA, recsB, today=None):
+    """The intake gate for one new note. Both readers must have read it; every existing note either
+    reader would put its lines into must be read by both as well (nothing lands in an unread note);
+    then agreement and the plan. Returns a report: 'status' is PLAN (lines ready), READ (notes both
+    must still read — listed), DISPUTE (the readers disagree on where), or PROBLEM (coverage). An
+    empty plan is never called success: a blocked note is READ or DISPUTE, said so."""
+    seen = {note}
+    for rs in (recsA, recsB):
+        for r in rs:
+            d = r.get("dest") or ""
+            if r.get("op") in PLACING and d and os.path.isfile(os.path.join(vault, d)):
+                seen.add(d)
+    want = sorted(seen)
+    eA, pA = effective(vault, cfg, recsA, notes=want)
+    eB, pB = effective(vault, cfg, recsB, notes=want)
+    if note not in eA or note not in eB:
+        return {"status": "PROBLEM", "problems": [p for p in pA + pB if p.startswith(("not read: " + note, note)) or note in p] or pA + pB}
+    _, runs0, _ = agree_detail(vault, {note: eA[note]}, {note: eB[note]})     # first: do they agree WHERE it goes?
+    if runs0:
+        return {"status": "DISPUTE", "disputes": runs0}
+    missing = sorted(n for n in want if n not in eA or n not in eB)
+    if missing:
+        return {"status": "READ", "must_read": missing,
+                "why": "an existing note a reader would put lines into must be read by both before anything lands in it"}
+    agreed, runs, acts = agree_detail(vault, eA, eB)
+    plan, rep = propose(vault, cfg, agreed, runs, today)
+    if any(r["note"] == note for r in runs):
+        return {"status": "DISPUTE", "disputes": [r for r in runs if r["note"] == note], "act_disputes": acts}
+    if note in rep["blocked"]:
+        return {"status": "READ", "must_read": [], "why": f"blocked by the plan builder: {rep['blocked']} — a destination is under dispute or unread"}
+    if not plan:
+        dest = {final_dest(r, note) for r in agreed[note].values()}
+        return {"status": "STAYS", "why": f"both readers keep it where it is ({sorted(dest)})", "acts": rep["acts"]}
+    return {"status": "PLAN", "plan": plan, "report": rep}
+
+def cmd_intake(V, cfg, argv):
+    """intake <note> <A> <B> — the gate above, printed; writes the plan when there is one."""
+    if len(argv) != 4:
+        print("intake   : need <note> <reading A> <reading B>"); return 2
+    note, A, B = argv[1], load_reading(argv[2]), load_reading(argv[3])
+    r = intake(V, cfg, note, A, B)
+    print(f"intake   : {note} — {r['status']}")
+    for k in ("why",):
+        if r.get(k): print("   " + r[k])
+    for p in r.get("problems", [])[:10]: print("   " + p)
+    for n in r.get("must_read", []): print("   must read (both): " + n)
+    for d in r.get("disputes", []): print(f"   dispute L{d['first']}–L{d['last']}: A → {final_dest(d['a'], note)} · B → {final_dest(d['b'], note)}")
+    if r["status"] == "PLAN":
+        p = os.path.join(sema_dir(), f"intake-{C.ts()}.tsv")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(f"# intake plan for {note} — proposed, NOT ratified\n" + "".join(l + "\n" for l in r["plan"]))
+        errs = C.simulate(V, C.load_plan(p), C.manifest_rows(V))[0]
+        print("\n".join("   " + l for l in r["plan"])); print("   dry run: " + ("OK" if not errs else str(errs[:2]))); print("   → " + p)
+        return 0 if not errs else 1
+    return 0 if r["status"] in ("PLAN", "STAYS") else 1
+
 # ---- what a person reads ---------------------------------------------------------------------
 def index_md(ix):
     L = [f"# Organ index — {ix['when']}", "", f"{ix['notes']} notes · {ix['sections']} sections · {ix['ranked']} ranked "
@@ -1042,6 +1099,8 @@ USAGE = """semantics.py — the semantic organ
                              places; the keeper ratifies. A note already in the vault never finds itself
   reading  <A>               coverage of one reading (a .jsonl file, or a folder of them)
   reading  <file> --slice <slices.json> <id>   coverage of one reader's slice: its units, every line once
+  intake   <note> <A> <B>    one new note: both read it; every existing note a reader would put it into
+                             must be read by both; then agreement → plan (or READ / DISPUTE / STAYS, said so)
   propose  <A> <B> [--ruling <rulings.tsv>]
                              coverage of both → (the keeper's rulings on disputed notes: note TAB A|B TAB why)
                              → agreement → plan + proposal in state/sema/ → dry run
@@ -1224,6 +1283,8 @@ def main(argv):
         for p in probs[:40]:
             print("   " + p)
         return 0 if not probs else 1
+    if argv[:1] == ["intake"]:
+        return cmd_intake(V, cfg, argv)
     if argv[:1] == ["place"] and len(argv) >= 2:
         return cmd_place(V, cfg, argv)
     if argv[:1] == ["segment"] and len(argv) == 2:
