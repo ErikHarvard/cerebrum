@@ -1,0 +1,7 @@
+# Personal or regenerable — never in the public repository.
+# snapshots/ holds full copies of a vault; state/ and cerebrum.json describe one person's vault.
+snapshots/
+state/
+cerebrum.json
+__pycache__/
+_probe-*/

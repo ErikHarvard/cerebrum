@@ -1,0 +1,18 @@
+{
+  "vault": "~/Documents/MyVault",
+  "para": ["# INBOX", "1 PROJECTS", "2 AREAS", "3 RESOURCES", "4 ARCHIVE"],
+  "law": "2 AREAS/CEREBRUM/LAW.md",
+  "meta_dirs": ["2 AREAS/CEREBRUM", "3 RESOURCES/Templates"],
+  "registry": "2 AREAS/CEREBRUM/REGISTRY.md",
+  "frozen": [
+    {"root": "Journal", "why": "written by a sync script — never moved by a pass",
+     "pins": [["~/bin/journal-sync.sh", "Journal"]]}
+  ],
+  "accepted": {
+    "duplicates": [],
+    "broken_links": [],
+    "sensitive": [],
+    "top_level": []
+  },
+  "pointers": []
+}
