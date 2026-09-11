@@ -1134,6 +1134,55 @@ try:
 finally:
     shutil.rmtree(tmp21, ignore_errors=True)
 
+print("== the Archivist: capture, two local readers through the gate, ask — with a canned model ==")
+import archivist as AR
+tmp22 = tempfile.mkdtemp(prefix="cerebrum-archivist-")
+try:
+    v, ocfg = organ_vault(tmp22)
+    rel = AR.capture(v, ocfg, "A / new: verse?", f"{SUNO} a fresh verse", source="test")
+    check("capture sanitizes the title, lands in the inbox, and keeps the text verbatim after a header",
+          rel == f"# INBOX/{AR.safe_title('A / new: verse?')}.md" and not any(ch in rel[8:] for ch in '/:*?"<>|')
+          and open(os.path.join(v, rel), encoding="utf-8").read().endswith(f"{SUNO} a fresh verse\n")
+          and open(os.path.join(v, rel), encoding="utf-8").read().startswith("---\ncaptured: "))
+    rel2 = AR.capture(v, ocfg, "A / new: verse?", "again")
+    check("a second capture with the same title never clobbers", rel2 != rel and rel2.endswith(" 2.md") and os.path.isfile(os.path.join(v, rel2)) and os.path.isfile(os.path.join(v, rel)))
+    check("records are parsed from JSON lines, fences and prose ignored",
+          [r["op"] for r in AR.parse_records('Here:\n```json\n{"lines": "*", "op": "keep", "dest": ""}\n```\nnot json {')] == ["keep"])
+    canned = {rel: '{"lines": "*", "op": "keep", "dest": "3 RESOURCES/Songs.md", "at": "after P000", "subject": "a verse", "use": "resource: songs", "why": "same songs"}',
+              "3 RESOURCES/Songs.md": '{"lines": "*", "op": "keep", "dest": "", "subject": "songs", "use": "resource: songs", "why": "home"}'}
+    real_llm = AR.llm
+    def fake_llm(messages, **k):
+        u = messages[1]["content"]
+        for note, out in canned.items():
+            if f"NOTE: `{note}`" in u: return out
+        return '{"lines": "*", "op": "keep", "dest": "", "subject": "s", "use": "u", "why": "w"}'
+    AR.llm = fake_llm
+    try:
+        recs, probs, _ = AR.local_read(v, ocfg, rel, {"notes": [{"note": "3 RESOURCES/Songs.md", "sim": 0.9, "section": {"pid": "P000", "heading": "Songwriting"}}]}, {"trials": 4, "same_folder_top1": 2}, "A")
+        check("a local reader's records get the note and its hash filled in and validate clean", probs == [] and recs and recs[0]["note_sha"] == C.sha256(os.path.join(v, rel)))
+        os.environ["CEREBRUM_EMBED"] = "fake"
+        import importlib; importlib.reload(SEM); AR.S = SEM; AR.CACHE_PATH = os.path.join(tmp22, "emb.json")
+        r = AR.place_note(v, ocfg, rel)
+        check("place: shortlist → two readers → the destination read in a second round → PLAN with an insert after the named section",
+              r["status"] == "PLAN" and any(l.startswith("insert\t3 RESOURCES/Songs.md\t") for l in r["plan"]) and os.path.isfile(r["plan_path"]))
+        AR.llm = lambda messages, **k: "no json at all"
+        r2 = AR.place_note(v, ocfg, rel2)
+        check("a reader that returns no records is a PROBLEM, never a plan", r2["status"] == "PROBLEM" and "plan" not in r2)
+        AR.llm = lambda messages, **k: "The verse says: tempo and hook [1]."
+        mw = SEM.MIN_WORDS; SEM.MIN_WORDS = 5                     # the fixture's sections are short
+        try:
+            a = AR.ask(v, ocfg, "what does the songs note say about tempo?", cache_path=None)
+        finally:
+            SEM.MIN_WORDS = mw
+        check("ask answers with a citation and saves a Markdown file", "[1]" in a["markdown"] and os.path.isfile(a["path"]) and "## Sources" in a["markdown"])
+        check("ask names its sources, every one a real note and section of the vault (the stand-in embedder cannot rank by meaning; the real one is calibrated by `place`)",
+              bool(a["sources"]) and all(os.path.isfile(os.path.join(v, x["note"])) and x["pid"].startswith("P") for x in a["sources"]))
+        check("ask changed nothing in the vault", open(os.path.join(v, "3 RESOURCES", "Songs.md"), "rb").read().startswith(b"# Songwriting"))
+    finally:
+        AR.llm = real_llm; AR.CACHE_PATH = None; os.environ.pop("CEREBRUM_EMBED", None); importlib.reload(SEM); AR.S = SEM
+finally:
+    shutil.rmtree(tmp22, ignore_errors=True)
+
 print("== registry: a live note inside its archived original is not proposed for removal ==")
 s, root, cfg = K._scratch()
 try:

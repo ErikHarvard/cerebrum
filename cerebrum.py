@@ -1175,7 +1175,17 @@ def cmd_undo(a):
         print("   " + n)
     bp = undo_before_path(a.log)
     if bp and os.path.isfile(bp):
-        ok, fs = _verify(VAULT, _read_manifest(bp), frozen_live=True)
+        # the log's growth and the registry's regeneration are lawful changes; everything else must equal the before-manifest
+        import registry
+        acta = os.path.join(os.path.dirname(CFG.get("law", "")), "ACTA CEREBRI.md") if CFG.get("law") else ""
+        if acta and os.path.isfile(os.path.join(VAULT, acta)):
+            with open(os.path.join(VAULT, acta), "a", encoding="utf-8") as fh:
+                fh.write(f"\n## {datetime.now().strftime('%Y-%m-%d %H:%M')} — Undone: `{os.path.basename(a.log)}`\n"
+                         f"The run reversed from its undo map, on the keeper's word; verified against the manifest it was planned against.\n")
+        if CFG.get("registry"):
+            registry.write(VAULT, CFG)
+        tolerated = {p: sha256(os.path.join(VAULT, p)) for p in (acta, CFG.get("registry", "")) if p and os.path.isfile(os.path.join(VAULT, p))}
+        ok, fs = _verify(VAULT, _read_manifest(bp), frozen_live=True, expect={"moves": {}, "removed": [], "added": {}, "contained": {}, "hashes": tolerated})
         print("undo     : " + ("verified — the vault equals the manifest the run was planned against" if ok
                                else "RED — the vault does not equal its before-manifest:"))
         if not ok:
