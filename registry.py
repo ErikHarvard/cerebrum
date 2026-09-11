@@ -164,6 +164,7 @@ def build_archivum(root, cfg):
     if intake:
         md += ["| when | event | note | where it went | by | why |", "|---|---|---|---|---|---|"]
         for r in intake:
+            r = dict(r, when=r.get("when_logged") or r["when"])          # a backfilled row keeps the time it was logged
             if r.get("event") == "capture":
                 md.append(f"| {r['when'][:16]} | capture | `{r['note']}` | `# INBOX` | the keeper's click | source: {r.get('source') or '—'}; {'polished, raw kept' if r.get('polished') else 'raw'} |")
             elif r.get("event") == "place":
@@ -180,6 +181,7 @@ def build_archivum(root, cfg):
     if retrieval:
         md += ["| when | question | passages copied out | answer file | why these |", "|---|---|---|---|---|"]
         for r in retrieval:
+            r = dict(r, when=r.get("when_logged") or r["when"])
             ps = "; ".join(f"`{p['note']}` {p['pid']} ({p['sim']})" for p in r.get("passages", [])[:4])
             md.append(f"| {r['when'][:16]} | {r['question'][:100]} | {ps} | `{os.path.basename(r['answer'])}` | {r.get('why','')[:90]} |")
     return "\n".join(md) + "\n"
