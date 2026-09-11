@@ -12,7 +12,7 @@ ratified by the keeper — and no instrument can check it (the Gödel bound).
 
     python3 semantics.py segment "<note path inside the vault>"   → state/parts-<name>.tsv
 """
-import os, re, sys, hashlib
+import os, glob, re, sys, hashlib
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cerebrum as C
 
@@ -193,12 +193,13 @@ def ollama_embed(texts, cfg):
             out += json.load(r)["embeddings"]
     return out
 
-def fake_embed(texts, cfg=None, dim=64):
+def fake_embed(texts, cfg=None, dim=4096):
     """A deterministic stand-in for tests: a hashed bag of words. It ranks shared vocabulary —
     enough for a test, and exactly why a real run uses a real model."""
     vs = []
     for t in texts:
         v = [0.0] * dim
+        t = t[len("clustering: "):] if t.startswith("clustering: ") else t     # the model's task prefix is not a word of the text
         for w in re.findall(r"[^\W_]+", t.lower()):
             v[int(hashlib.md5(w.encode()).hexdigest(), 16) % dim] += 1.0
         vs.append(v)
@@ -554,6 +555,110 @@ def cmd_place(V, cfg, argv):
     print(f"   lean: {r['lean'] + '/' if r.get('lean') else 'none'}   → {out}")
     return 0
 
+# ---- titles: a note's name is its fixed point — the title must pick out the note among all notes ----
+def titles(vault, cfg, embed=None, cache_path=None, folders=True):
+    """Name(x) = ρ(ρ(x)) (Being & Becoming): the name is what the note collapses to. Measured: each placeable
+    note's title, embedded and centred like a section, is set against every note's centroid; the title
+    must rank its own note first. A title that names another note better than its own is not that note's
+    fixed point — a proposal to rename (in Obsidian, so links follow), or a sign two notes share a subject.
+    Likewise each folder's name against its notes' centroids. Returns a report; nothing moves."""
+    import numpy as np
+    embed = embed or embedder()
+    notes, secs, M, mu = _corpus(vault, cfg, embed, cache_path)
+    if M is None:
+        return {"notes": [], "folders": [], "failing": [], "measured": 0}
+    S_ = M                                            # raw cosine: a title is a few words, not a section; only the RANK in its row is used
+    by_note = defaultdict(list)
+    for k, x in enumerate(secs):
+        by_note[x["note"]].append(k)
+    names = sorted(by_note)
+    cents = []
+    for rel in names:
+        ks = by_note[rel]; w = np.array([secs[k]["words"] for k in ks], dtype=float)
+        c = (S_[ks] * w[:, None]).sum(0); c /= (np.linalg.norm(c) or 1.0); cents.append(c)
+    Cn = np.array(cents)
+    title_of = lambda rel: os.path.splitext(os.path.basename(rel))[0]
+    T = section_vectors([{"text": title_of(rel)} for rel in names], cfg, embed, cache_path)
+    sims = T @ Cn.T                                   # title i × note j
+    rows, failing = [], []
+    for i, rel in enumerate(names):
+        order = np.argsort(-sims[i]); rank = int(np.where(order == i)[0][0]) + 1
+        best = names[int(order[0])]
+        row = {"note": rel, "title": title_of(rel), "rank": rank, "own": round(float(sims[i, i]), 3),
+               "best": best if rank > 1 else None, "best_sim": round(float(sims[i, int(order[0])]), 3),
+               "runner_up_gap": round(float(sims[i, i] - sims[i, int(order[1])]), 3) if len(names) > 1 and rank == 1 else None}
+        rows.append(row)
+        if rank > 1 or row["own"] <= 0.05:              # names another note better, or shares nothing with its own
+            failing.append(row)
+    frows = []
+    if folders:
+        by_folder = defaultdict(list)
+        for i, rel in enumerate(names):
+            d = os.path.dirname(rel)
+            if d.count("/") >= 1:                     # a container inside a category: category/container
+                by_folder[d].append(i)
+        fnames = sorted(by_folder)
+        if fnames:
+            Fc = np.array([np.mean(Cn[by_folder[d]], 0) for d in fnames]); Fc /= np.linalg.norm(Fc, axis=1, keepdims=True)
+            Ft = section_vectors([{"text": os.path.basename(d)} for d in fnames], cfg, embed, cache_path)
+            fs = Ft @ Fc.T
+            for i, d in enumerate(fnames):
+                order = np.argsort(-fs[i]); rank = int(np.where(order == i)[0][0]) + 1
+                frows.append({"folder": d, "rank": rank, "own": round(float(fs[i, i]), 3), "best": fnames[int(order[0])] if rank > 1 else None, "notes": len(by_folder[d])})
+    return {"notes": rows, "folders": frows, "failing": failing, "failing_folders": [f for f in frows if f["rank"] > 1],
+            "measured": len(names), "holds": len(names) - len(failing)}
+
+def titles_control(vault, cfg, embed=None, cache_path=None):
+    """Before titles are judged by embedding, the instrument proves it can see a title at all: each note's own
+    first heading, used as its title, must rank the note first. Measured 2026-09-11 on this vault with
+    nomic-embed-text: 2/88 raw, 6/88 centred — the instrument is blind to titles here; the reader judges instead."""
+    import numpy as np
+    embed = embed or embedder()
+    notes, secs, M, mu = _corpus(vault, cfg, embed, cache_path)
+    if M is None:
+        return {"measured": 0, "rank1": 0}
+    by_note = defaultdict(list)
+    for k, x in enumerate(secs):
+        by_note[x["note"]].append(k)
+    names = sorted(by_note)
+    cents = []
+    for rel in names:
+        ks = by_note[rel]; w = np.array([secs[k]["words"] for k in ks], dtype=float)
+        c = (M[ks] * w[:, None]).sum(0); c /= (np.linalg.norm(c) or 1.0); cents.append(c)
+    Cn = np.array(cents)
+    heads = [next((secs[k]["heading"] for k in by_note[rel] if secs[k]["heading"]), os.path.splitext(os.path.basename(rel))[0]) for rel in names]
+    T = section_vectors([{"text": h} for h in heads], cfg, embed, cache_path)
+    sims = T @ Cn.T
+    rank1 = sum(int(np.argmax(sims[i])) == i for i in range(len(names)))
+    return {"measured": len(names), "rank1": int(rank1)}
+
+def inbound_links(vault, cfg, rel):
+    """Notes that link to `rel` by name — a rename must be done where links follow (Obsidian), or the links break."""
+    name = os.path.splitext(os.path.basename(rel))[0].lower()
+    out = []
+    for p in scope(vault, cfg):
+        if p == rel:
+            continue
+        for m in C.WIKI.finditer(C._strip_code(read_bytes(vault, p).decode("utf-8", "replace"))):
+            t = m.group(1).split("|")[0].split("#")[0].strip().lower()
+            if t == name or t == name + ".md" or t.endswith("/" + name) or t.endswith("/" + name + ".md"):
+                out.append(p); break
+    return out
+
+def titles_md(r, vault, cfg, subjects=None):
+    L = [f"# Titles as fixed points — measured", "",
+         f"Of {r['measured']} placeable notes, **{r['holds']}** have a title that picks out their own note among all notes; "
+         f"**{len(r['failing'])}** do not. A failing title is a proposal to rename — in Obsidian, so links follow — or a sign that two notes share a subject.", ""]
+    if r["failing"]:
+        L += ["| note | its title ranks its note | the note the title names better | inbound links | the readers called it |", "|---|---|---|---|---|"]
+        for x in sorted(r["failing"], key=lambda x: -x["rank"]):
+            subj = (subjects or {}).get(x["note"], "")
+            L.append(f"| `{x['note']}` | #{x['rank']} ({x['own']}) | `{x['best']}` ({x['best_sim']}) | {len(inbound_links(vault, cfg, x['note']))} | {subj[:90]} |")
+    if r.get("failing_folders"):
+        L += ["", "**Folders whose name does not pick out their notes:**"] + [f"- `{f['folder']}/` — ranks #{f['rank']}; the name fits `{f['best']}/` better ({f['notes']} notes)" for f in r["failing_folders"]]
+    L += ["", "Every score only ranks. Renaming is the keeper's, in Obsidian; the organ measures again after."]
+    return "\n".join(L) + "\n"
+
 # ---- a synthesis: traceable, or it is a new claim --------------------------------------------
 SOURCE_LINE = re.compile(r"^- \[(S\d+)\] `([^`]+)` (P\d{3}) sha:([0-9a-f]{12})")
 CITE = re.compile(r"\[(S\d+(?:\s*,\s*S\d+)*)\]")
@@ -846,6 +951,16 @@ def _spec(lines):
             runs.append([l, l])
     return ",".join(f"L{a}-L{b}" if a != b else f"L{a}" for a, b in runs)
 
+def frontmatter_lines(data):
+    """The line numbers of a note's YAML frontmatter (the opening and closing --- included), else empty."""
+    lines = (data.decode("utf-8", "replace") if isinstance(data, bytes) else data).splitlines()
+    if not lines or lines[0].strip() != "---":
+        return set()
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            return set(range(1, i + 2))
+    return set()
+
 LEAVE = "(leave)"                        # a ≡-merged line goes nowhere: its destination already holds it
 
 def propose(vault, cfg, agreed, runs, today=None):
@@ -886,6 +1001,14 @@ def propose(vault, cfg, agreed, runs, today=None):
         for l in range(1, n + 1):
             last = fd.get(l, last)
             place[rel][l] = last or first
+        # no header-only stub: if every line kept at the note's own path is frontmatter, and the rest leaves,
+        # the frontmatter is left in the archived original rather than recomposed as an empty note
+        fm = frontmatter_lines(data[rel])
+        kept = [l for l, d in place[rel].items() if d == rel and l in nb[rel]]      # blank lines follow their neighbours
+        if kept and set(kept) <= fm and any(d != rel for d in place[rel].values()):
+            for l, d in list(place[rel].items()):
+                if d == rel:                                      # the frontmatter and the blanks that follow it
+                    place[rel][l] = LEAVE
     contrib, order = defaultdict(list), []          # dest → [(note, lines)] in note order
     for rel in sorted(place):
         byd = defaultdict(list)
@@ -1125,6 +1248,8 @@ USAGE = """semantics.py — the semantic organ
                              places; the keeper ratifies. A note already in the vault never finds itself
   reading  <A>               coverage of one reading (a .jsonl file, or a folder of them)
   reading  <file> --slice <slices.json> <id>   coverage of one reader's slice: its units, every line once
+  titles                     every placeable note's title against every note's centroid: the title must rank its
+                             own note first (Name(x) = ρ(ρ(x))); those that do not → state/sema/titles-<ts>.md
   intake   <note> <A> <B>    one new note: both read it; every existing note a reader would put it into
                              must be read by both; then agreement → plan (or READ / DISPUTE / STAYS, said so)
   propose  <A> <B> [--ruling <rulings.tsv>]
@@ -1309,6 +1434,27 @@ def main(argv):
         for p in probs[:40]:
             print("   " + p)
         return 0 if not probs else 1
+    if argv[:1] == ["titles"]:
+        cache = os.path.join(sema_dir(), "embeddings.json")
+        ctl = titles_control(V, cfg, cache_path=cache)
+        print(f"control  : the note's own first heading as its title ranks the note first {ctl['rank1']}/{ctl['measured']} times")
+        if ctl["measured"] and ctl["rank1"] < ctl["measured"] * 0.5:
+            print("titles   : INVALID on this model — it cannot match a heading to its own note, so it cannot judge titles. "
+                  "Use `archivist.py titles` (a reader judges each title against the note's parts). Nothing reported."); return 1
+        r = titles(V, cfg, cache_path=cache)
+        subjects = {}
+        for f in sorted(glob.glob(os.path.join(sema_dir(), "reading-A", "*.jsonl"))):
+            for rec in load_reading(f):
+                if rec.get("lines") == "*" and rec.get("subject"):
+                    subjects[rec["note"]] = rec["subject"]
+        out = os.path.join(sema_dir(), f"titles-{C.ts()}.md")
+        with open(out, "w", encoding="utf-8") as fh:
+            fh.write(titles_md(r, V, cfg, subjects))
+        print(f"titles   : {r['holds']}/{r['measured']} titles pick out their own note · {len(r['failing'])} do not · "
+              f"{len(r.get('failing_folders', []))} folder name(s) do not → {out}")
+        for x in sorted(r["failing"], key=lambda x: -x["rank"])[:12]:
+            print(f"   #{x['rank']:<3} {x['note']}  ← names `{x['best']}` better")
+        return 0
     if argv[:1] == ["intake"]:
         return cmd_intake(V, cfg, argv)
     if argv[:1] == ["place"] and len(argv) >= 2:

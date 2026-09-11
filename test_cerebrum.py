@@ -3,6 +3,11 @@
 verifier's verdict AND that it names the change by path. Exits nonzero on any failure.
 Touches nothing real (one gio-trash probe round-trips a scratch file outside the vault)."""
 import os, sys, shutil, tempfile, json, atexit
+# the suite never touches the live state: its own state, snapshots and embeddings cache, thrown away at the end
+_suite_state = tempfile.mkdtemp(prefix="cerebrum-suite-state-")
+os.environ["CEREBRUM_STATE"] = os.path.join(_suite_state, "state"); os.environ["CEREBRUM_SNAPSHOTS"] = os.path.join(_suite_state, "snapshots")
+os.makedirs(os.environ["CEREBRUM_STATE"]); os.makedirs(os.environ["CEREBRUM_SNAPSHOTS"])
+atexit.register(lambda: shutil.rmtree(_suite_state, ignore_errors=True))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # The tests carry their own config: they never read the real vault's register.
 _cfg_dir = tempfile.mkdtemp(prefix="cerebrum-testcfg-")
@@ -1137,6 +1142,7 @@ finally:
 print("== the Archivist: capture, two local readers through the gate, ask — with a canned model ==")
 import archivist as AR
 tmp22 = tempfile.mkdtemp(prefix="cerebrum-archivist-")
+_real_log = AR.LOG; AR.LOG = os.path.join(tmp22, "archivist.log")       # never the live log
 try:
     v, ocfg = organ_vault(tmp22)
     rel = AR.capture(v, ocfg, "A / new: verse?", f"{SUNO} a fresh verse", source="test")
@@ -1178,10 +1184,71 @@ try:
         check("ask names its sources, every one a real note and section of the vault (the stand-in embedder cannot rank by meaning; the real one is calibrated by `place`)",
               bool(a["sources"]) and all(os.path.isfile(os.path.join(v, x["note"])) and x["pid"].startswith("P") for x in a["sources"]))
         check("ask changed nothing in the vault", open(os.path.join(v, "3 RESOURCES", "Songs.md"), "rb").read().startswith(b"# Songwriting"))
+        AR.llm = lambda messages, **k: "# Polished\n\nThe verse names its tempo and its hook.\n"
+        rel3 = AR.capture(v, ocfg, "polish me", "teh verse names its tempo adn its hook", do_polish=True)
+        body3 = open(os.path.join(v, rel3), encoding="utf-8").read()
+        check("polish: the polished text is the body, the raw words are kept verbatim beneath, and the header says so",
+              "polished: by the Archivist" in body3 and "The verse names its tempo and its hook." in body3
+              and "> teh verse names its tempo adn its hook" in body3 and "Raw capture, verbatim" in body3)
+        AR.llm = lambda messages, **k: ""
+        rel4 = AR.capture(v, ocfg, "polish fails", "raw stays", do_polish=True)
+        body4 = open(os.path.join(v, rel4), encoding="utf-8").read()
+        check("polish that returns nothing → the raw text is used and the header says no", "polished: no" in body4 and "raw stays" in body4)
+        check("the suite wrote nothing into the live Archivist log", AR.LOG != _real_log and os.path.isfile(AR.LOG))
     finally:
         AR.llm = real_llm; AR.CACHE_PATH = None; os.environ.pop("CEREBRUM_EMBED", None); importlib.reload(SEM); AR.S = SEM
 finally:
+    AR.LOG = _real_log
     shutil.rmtree(tmp22, ignore_errors=True)
+
+print("== titles: a title must pick out its own note; one that names another note better is reported ==")
+tmp23 = tempfile.mkdtemp(prefix="cerebrum-titles-")
+try:
+    v = os.path.join(tmp23, "vault")
+    for d in ["3 RESOURCES/Music", "3 RESOURCES/Lifting"]: os.makedirs(os.path.join(v, d))
+    open(os.path.join(v, "3 RESOURCES/Music/Suno prompt formula verse chorus.md"), "w").write(f"# Suno\n{SUNO} songs\n\n# More\n{SUNO} again\n")
+    open(os.path.join(v, "3 RESOURCES/Music/Hook melody lyric rhythm.md"), "w").write(f"# Hooks\n{SUNO} hooks\n\n# Melody\n{SUNO} melody\n")
+    open(os.path.join(v, "3 RESOURCES/Lifting/Barbell deadlift spine brace.md"), "w").write(f"# Deadlift\n{LIFT} lifting\n\n# Program\n{LIFT} program\n")
+    open(os.path.join(v, "3 RESOURCES/Lifting/Suno hooks.md"), "w").write(f"# Barbell notes\n{LIFT} more lifting\n\n# Sets\n{LIFT} sets\n")   # a lifting note wearing a music title
+    cfg = {"para": list(C.PARA), "frozen": [], "accepted": {}}
+    r = SEM.titles(v, cfg, SEM.fake_embed)
+    byn = {x["note"]: x for x in r["notes"]}
+    check("a title made of the note's own words picks out its note (rank 1)", byn["3 RESOURCES/Music/Suno prompt formula verse chorus.md"]["rank"] == 1 and byn["3 RESOURCES/Lifting/Barbell deadlift spine brace.md"]["rank"] == 1)
+    check("a lifting note titled with music words is reported: its title names a music note better",
+          any(x["note"].endswith("Suno hooks.md") for x in r["failing"]) and byn["3 RESOURCES/Lifting/Suno hooks.md"]["rank"] > 1
+          and byn["3 RESOURCES/Lifting/Suno hooks.md"]["best"].startswith("3 RESOURCES/Music/"))
+    check("the folder named for its notes' subject ranks first", any(f["folder"] == "3 RESOURCES/Lifting" and f["rank"] == 1 for f in r["folders"]))
+    md = SEM.titles_md(r, v, cfg, {"3 RESOURCES/Lifting/Suno hooks.md": "barbell sets"})
+    check("the report names the failing note, what it names better, and what the readers called it", "Suno hooks.md" in md and "barbell sets" in md and "inbound links" in md)
+    open(os.path.join(v, "3 RESOURCES/Music/Hook melody lyric rhythm.md"), "a").write("\nsee [[Suno hooks]]\n")
+    check("inbound links to a note are counted, so a rename is known to need Obsidian", SEM.inbound_links(v, cfg, "3 RESOURCES/Lifting/Suno hooks.md") == ["3 RESOURCES/Music/Hook melody lyric rhythm.md"])
+finally:
+    shutil.rmtree(tmp23, ignore_errors=True)
+
+print("== no header-only stub: a captured note whose body leaves takes its frontmatter to the archive, not an empty note ==")
+tmp24 = tempfile.mkdtemp(prefix="cerebrum-stub-")
+try:
+    v, ocfg = organ_vault(tmp24)
+    open(os.path.join(v, "# INBOX", "Cap.md"), "w").write(f"---\ncaptured: today\nvia: the Archivist\n---\n\n# Verse\n{SUNO} a new verse\n")
+    base = [r for r in keep_all(v, ocfg) if r["note"] != "# INBOX/Cap.md"]
+    recs = base + [rec(v, "# INBOX/Cap.md", "P000"), rec(v, "# INBOX/Cap.md", "P001", dest="3 RESOURCES/Songs.md")]
+    e = SEM.effective(v, ocfg, recs)[0]
+    agreed, runs, _ = SEM.agree_detail(v, e, e)
+    plan = SEM.propose(v, ocfg, agreed, runs, today="2026-01-01")[0]
+    check("the frontmatter is left in the archived original; nothing is recomposed at the inbox path",
+          any(l.startswith("leave\t") for l in plan) and not any(l.startswith("compose\t# INBOX/Cap.md") for l in plan)
+          and any(l.startswith("extend\t3 RESOURCES/Songs.md") for l in plan)
+          and C.simulate(v, write_plan(os.path.join(tmp24, "p.tsv"), plan), manifest(v))[0] == [])
+    open(os.path.join(v, "# INBOX", "Two parts.md"), "w").write(f"---\nvia: x\n---\n\n# Keep\n{LIFT} stays here\n\n# Go\n{SUNO} goes\n")
+    base2 = [r for r in keep_all(v, ocfg) if r["note"] not in ("# INBOX/Two parts.md", "# INBOX/Cap.md")] + [rec(v, "# INBOX/Cap.md")]
+    recs2 = base2 + [rec(v, "# INBOX/Two parts.md", "P000-P001"), rec(v, "# INBOX/Two parts.md", "P002", dest="3 RESOURCES/Songs.md")]
+    e2 = SEM.effective(v, ocfg, recs2)[0]
+    plan2 = SEM.propose(v, ocfg, *SEM.agree_detail(v, e2, e2)[:2], today="2026-01-01")[0]
+    check("a note that keeps real lines beside its frontmatter is still recomposed at its path", any(l.startswith("compose\t# INBOX/Two parts.md") for l in plan2))
+    check("frontmatter lines are found exactly, and a note without frontmatter has none",
+          SEM.frontmatter_lines(b"---\na: 1\n---\nbody\n") == {1, 2, 3} and SEM.frontmatter_lines(b"# no\nbody\n") == set())
+finally:
+    shutil.rmtree(tmp24, ignore_errors=True)
 
 print("== registry: a live note inside its archived original is not proposed for removal ==")
 s, root, cfg = K._scratch()
