@@ -765,6 +765,32 @@ try:
 finally:
     shutil.rmtree(tmp12, ignore_errors=True)
 
+print("== WHERE a line goes and WHAT ELSE is done to it are two facts: an act dispute blocks nothing ==")
+tmp13 = tempfile.mkdtemp(prefix="cerebrum-acts-")
+try:
+    v, ocfg = organ_vault(tmp13)
+    base = [r for r in keep_all(v, ocfg) if r["note"] != "# INBOX/Two.md"]
+    to_beta = rec(v, "# INBOX/Two.md", "P001", dest="2 AREAS/Beta.md")
+    eB = SEM.effective(v, ocfg, base + [rec(v, "# INBOX/Two.md", "P000"), to_beta])[0]
+    eA = SEM.effective(v, ocfg, base + [rec(v, "# INBOX/Two.md", "P000", op="mark"), to_beta])[0]
+    agreed, runs, acts = SEM.agree_detail(v, eA, eB)
+    check("the readers agree where every line goes and differ only on marking P000",
+          runs == [] and len(acts) == 1 and acts[0]["note"] == "# INBOX/Two.md")
+    plan, rep = SEM.propose(v, ocfg, agreed, runs, today="2026-01-01")
+    check("so the split still runs, and the disputed mark is not done",
+          any("2 AREAS/Beta.md" in x for x in plan) and not rep["acts"].get("mark")
+          and C.simulate(v, write_plan(os.path.join(tmp13, "p.tsv"), plan), manifest(v))[0] == [])
+    eS = SEM.effective(v, ocfg, base + [rec(v, "# INBOX/Two.md", "P000", op="synthesize", dest="3 RESOURCES/Syn.md"), to_beta])[0]
+    agreed2, runs2, acts2 = SEM.agree_detail(v, eS, eB)
+    plan2 = SEM.propose(v, ocfg, agreed2, runs2, today="2026-01-01")[0]
+    check("a disputed synthesis leaves its lines where they are — they never follow the synthesis note",
+          runs2 == [] and len(acts2) == 1 and not any("Syn.md" in x for x in plan2)
+          and C.simulate(v, write_plan(os.path.join(tmp13, "q.tsv"), plan2), manifest(v))[0] == [])
+    eP = SEM.effective(v, ocfg, base + [rec(v, "# INBOX/Two.md", "P000", dest="3 RESOURCES/Elsewhere.md"), to_beta])[0]
+    check("a dispute on WHERE still blocks the note", SEM.agree_detail(v, eP, eB)[1] != [])
+finally:
+    shutil.rmtree(tmp13, ignore_errors=True)
+
 print("== embedding windows: a character budget, never a word count; no word lost ==")
 dense = " ".join(f"https://example.com/video/BV{i:08d}?spm_id_from=333.337.search-card.all.click" for i in range(300))
 ws = SEM.windows(dense + " " + "x" * 4000)

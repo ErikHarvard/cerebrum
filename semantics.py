@@ -524,37 +524,48 @@ def _group_ids(eff, nb):
     h = lambda xs: hashlib.sha1(repr(sorted(xs)).encode()).hexdigest()
     return {d: h(x) for d, x in place.items()}, {d: h(x) for d, x in syn.items()}
 
-def agree(vault, effA, effB):
-    """Line by line — non-blank lines; a blank line follows its neighbours — do two independent
-    readings put it in the same place, with the same act? An existing note is known by its path; a
-    new note has no path yet, so it is known by exactly what it holds: two readers agree on it only
-    if they fill it with the same lines, whatever they call it. Disagreement is the codex's vacuous
-    case — two fixed points, nothing selected — and goes to the keeper, never into a plan.
-    Returns (agreed {note: {line: reader A's record}}, runs of disagreement)."""
+def agree_detail(vault, effA, effB):
+    """Line by line — non-blank lines; a blank line follows its neighbours — two independent readings
+    are compared on two separate facts, never one label (the codex keeps a verdict and its cause
+    apart): WHERE the line goes, and WHAT ELSE is done to it — mark, link, horizon, synthesis,
+    dedupe. An existing note is known by its path; a new note has no path yet, so it is known by
+    exactly what it holds: two readers agree on it only if they fill it with the same lines, whatever
+    they call it. A dispute on where is the codex's vacuous case — nothing selected — and blocks its
+    note. A dispute only on what else blocks nothing: the lines go where both put them, the act is
+    not done, and the dispute goes to the keeper.
+    Returns (agreed {note: {line: record}}, place disputes, act disputes)."""
     notes = sorted(set(effA) & set(effB))
     nb = {rel: nonblank(vault, rel) for rel in notes}
     gA, sA = _group_ids({r: effA[r] for r in notes}, nb)
     gB, sB = _group_ids({r: effB[r] for r in notes}, nb)
-    def act(r, rel, g, s):
+    def where(r, rel, g):
         d = final_dest(r, rel)
-        where = ("path", d) if os.path.isfile(os.path.join(vault, d)) else ("new", os.path.dirname(d), g[d])
-        return (where, "" if r["op"] in PLACING else r["op"],
-                s.get(r["dest"]) if r["op"] == "synthesize" else None,
-                "≡" if r["op"] == "merge" and r.get("relation") == "≡" else "",
+        return ("path", d) if os.path.isfile(os.path.join(vault, d)) else ("new", os.path.dirname(d), g[d])
+    def what(r, s):
+        return ("" if r["op"] in PLACING else r["op"], s.get(r["dest"]) if r["op"] == "synthesize" else None,
                 tuple(sorted(r.get("with", []))) if r["op"] == "link" else ())
-    agreed, runs = {}, []
+    def extend_run(runs, cur, rel, l, a, b):
+        if cur and cur["a"] is a and cur["b"] is b:
+            cur["last"] = l; return cur
+        runs.append({"note": rel, "first": l, "last": l, "a": a, "b": b})
+        return runs[-1]
+    agreed, runs, act_runs, plain = {}, [], [], {}
     for rel in notes:
-        agreed[rel], cur = {}, None
+        agreed[rel], cur, cur_act = {}, None, None
         for l in nb[rel]:
             a, b = effA[rel][l], effB[rel][l]
-            if act(a, rel, gA, sA) == act(b, rel, gB, sB):
-                agreed[rel][l], cur = a, None
-            elif cur and cur["a"] is a and cur["b"] is b:
-                cur["last"] = l
-            else:
-                cur = {"note": rel, "first": l, "last": l, "a": a, "b": b}
-                runs.append(cur)
-    return agreed, runs
+            if where(a, rel, gA) != where(b, rel, gB):
+                cur, cur_act = extend_run(runs, cur, rel, l, a, b), None
+            elif what(a, sA) == what(b, sB):
+                agreed[rel][l], cur, cur_act = a, None, None
+            else:                                   # the act is not done: the line only stays where both put it
+                agreed[rel][l] = a if a["op"] in PLACING else plain.setdefault(id(a), dict(a, op="keep", dest=""))
+                cur, cur_act = None, extend_run(act_runs, cur_act, rel, l, a, b)
+    return agreed, runs, act_runs
+
+def agree(vault, effA, effB):
+    """(agreed, place disputes) — see agree_detail."""
+    return agree_detail(vault, effA, effB)[:2]
 
 # ---- the proposal: a plan made only of what both readings agree on ------------------------------
 def _spec(lines):
@@ -846,14 +857,18 @@ def cmd_propose(V, cfg, argv):
             print("   " + n)
         if missing:
             return 1
-    agreed, runs = agree(V, effA, effB)
+    agreed, runs, act_runs = agree_detail(V, effA, effB)
     plan, rep = propose(V, cfg, agreed, runs)
+    rep["act_disputes"] = act_runs
     base = os.path.join(sema_dir(), f"proposal-{C.ts()}")
     with open(base + ".tsv", "w", encoding="utf-8") as fh:
         fh.write("# the organ's plan — proposed, NOT ratified\n" + "".join(l + "\n" for l in plan))
     errors = C.simulate(V, C.load_plan(base + ".tsv"), C.manifest_rows(V))[0] if plan else []
     md = proposal_md(rep, base + ".tsv", errors, sum(len(a) for a in agreed.values()),
                      sum(len(nonblank(V, r)) for r in agreed))
+    md += ("\n## The readers agree where the lines go, but not on what else to do — so it is not done\n\n"
+           + ("\n".join(f"- `{x['note']}` L{x['first']}–L{x['last']} — A: {x['a']['op']} ({x['a'].get('why', '')}) · "
+                        f"B: {x['b']['op']} ({x['b'].get('why', '')})" for x in act_runs) or "- none") + "\n")
     if partial:
         must = set(second_read_set(V, cfg, effA, sample=0)[0])
         checked = set(effB) - must
