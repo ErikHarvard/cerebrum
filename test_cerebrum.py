@@ -1040,6 +1040,10 @@ try:
           and s_now.index(piece) > len(head) and len(s_now) == len(head) + len(tail) + len(s_now) - len(head) - len(tail))
     check("the verifier's expected bytes are the dry run's, and they match", exp["hashes"]["3 RESOURCES/Songs.md"] == C.sha256(songs))
     check("undo cuts exactly the inserted region back out", C.undo_plan(v, os.path.join(tmp20, "u.tsv")) == [] and open(songs, "rb").read() == s_before)
+    nn = os.path.join(v, "3 RESOURCES", "NoNewline.md"); open(nn, "wb").write(b"# T\nlast line without newline")
+    nb = open(nn, "rb").read(); newb, st, ln = C._insert_bytes(nb, 2, b"block")
+    check("insert after the last line of a note with no trailing newline: undo cuts exactly what was added (the rehearsal caught this live)",
+          newb[:st] + newb[st + ln:] == nb and newb.endswith(b"block\n") and b"newline\n\nblock" in newb)
     check("insert after a line the note does not have is refused",
           C.simulate(v, write_plan(os.path.join(tmp20, "q.tsv"), ["insert\t3 RESOURCES/Songs.md\tL999\t# INBOX/Two.md\tP001"]), manifest(v))[0] != [])
     check("insert into a note that does not exist is refused",

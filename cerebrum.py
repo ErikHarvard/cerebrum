@@ -545,11 +545,10 @@ def _insert_bytes(old_b, after, block):
     undo can cut exactly it back out."""
     lines = old_b.splitlines(keepends=True)
     head, tail = b"".join(lines[:after]), b"".join(lines[after:])
-    if head and not head.endswith(b"\n"):
-        head += b"\n"
     if not block.endswith(b"\n"):
         block += b"\n"
-    region = (b"\n" if head else b"") + block + (b"\n" if tail else b"")
+    # everything added — including a newline the head lacked — is inside the region, so the undo cuts exactly it
+    region = (b"\n" if head and not head.endswith(b"\n") else b"") + (b"\n" if head else b"") + block + (b"\n" if tail else b"")
     return head + region + tail, len(head), len(region)
 
 def _merge_bytes(dst, sources, read):
