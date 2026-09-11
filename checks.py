@@ -114,16 +114,17 @@ def r_links(v):
         if MD(p):
             names[base(p)].append(p)
             paths.add(p[:-3].lower())
-    ok = {x.lower() for x in v.accepted.get("broken_links", [])}
+    ok = {(x["in"].lower(), x["to"].lower()) for x in v.accepted.get("broken_links", []) if isinstance(x, dict)}
     verbatim = set(v.accepted.get("verbatim", []))    # word-for-word merges: their links are record, not navigation
+    sensitive = set(v.accepted.get("sensitive", []))  # never opened
     out = []
     for p in v.movable:
-        if not MD(p) or p in verbatim:
+        if not MD(p) or p in verbatim or p in sensitive:
             continue
         for m in C.WIKI.finditer(C._strip_code(v.text(p))):
             t = m.group(1).split("|")[0].split("#")[0].strip()
             tl = t.lower()
-            if not t or tl in ok:
+            if not t or (p.lower(), tl) in ok:
                 continue
             if "/" in t:
                 hits = [t] if (tl in paths or tl + ".md" in paths) else []
@@ -172,7 +173,10 @@ def r_law(v):
     if not os.path.isfile(os.path.join(v.root, law)):
         return [f"the law is not at {law}"]
     home = os.path.dirname(law)
-    return [] if home in v.text(law) else [f"the law does not name its own home ({home})"]
+    where = [l for l in v.text(law).splitlines() if l.startswith("**Where.**")]
+    if not where:
+        return ["the law has no '**Where.**' line saying where it lives"]
+    return [] if any(home in l for l in where) else [f"the law's '**Where.**' line does not name its own home ({home})"]
 
 SECRETS = [
     ("Hugging Face token", r"\bhf_[A-Za-z0-9]{30,}"),
@@ -457,16 +461,22 @@ def r_exceptions(v):
             out.append(f"accepted duplicate pair no longer identical: {x} · {y}")
     if len(dups) % 2:
         out.append(f"accepted duplicates: an odd entry, no pair: {dups[-1]}")
-    targets = set()
+    sensitive = set(a.get("sensitive", []))
+    links_in = {}
     for p in v.movable:
-        if MD(p):
-            targets |= {m.group(1).split("|")[0].split("#")[0].strip().lower() for m in C.WIKI.finditer(C._strip_code(v.text(p)))}
+        if MD(p) and p not in sensitive:
+            links_in[p.lower()] = {m.group(1).split("|")[0].split("#")[0].strip().lower() for m in C.WIKI.finditer(C._strip_code(v.text(p)))}
     names = {base(p) for p in v.visible if MD(p)} | {os.path.basename(p).lower() for p in v.visible}
-    for t in a.get("broken_links", []):
-        if t.lower() not in targets:
-            out.append(f"accepted broken link no longer linked anywhere: {t}")
-        elif t.lower() in names:
-            out.append(f"accepted broken link now resolves: {t}")
+    for x in a.get("broken_links", []):
+        if not isinstance(x, dict) or "in" not in x or "to" not in x:
+            out.append(f"accepted broken link must be a pair {{in: note, to: target}}, not {x!r}"); continue
+        n, t = x["in"].lower(), x["to"].lower()
+        if n not in links_in:
+            out.append(f"accepted broken link: the note is gone: {x['in']}")
+        elif t not in links_in[n]:
+            out.append(f"accepted broken link: {x['in']} no longer links to {x['to']}")
+        elif t in names:
+            out.append(f"accepted broken link now resolves: {x['to']}")
     for p in a.get("sensitive", []):
         if not ex(p): out.append(f"accepted sensitive note is gone: {p}")
     for d in a.get("top_level", []):
@@ -486,7 +496,7 @@ def _scratch():
     rules = " · ".join(r.name for r in RULES)
     ops = "\n".join(f"| `{o} …` | does | refused |" for o in sorted(set(C.ARITY) | {"merge"}))
     open(os.path.join(v, "2 AREAS/META/LAW.md"), "w").write(
-        "# Law\nThis law lives in 2 AREAS/META.\n\n## VII. Rite\n\n| Operation | Does | Refused when |\n|---|---|---|\n"
+        "# Law\n\n**Where.** `2 AREAS/META/` — inside the folders, not above them.\n\n## VII. Rite\n\n| Operation | Does | Refused when |\n|---|---|---|\n"
         + ops + "\n\n## XV. Check\n\n| Law | At the vault | Rules |\n|---|---|---|\n| **All** | rules | " + rules + " |\n")
     os.makedirs(os.path.join(v, "EXTRA")); open(os.path.join(v, "EXTRA/kept.md"), "w").write("kept\n")
     open(os.path.join(v, "1 PROJECTS/Plan.md"), "w").write("see [[Idea]]\n")

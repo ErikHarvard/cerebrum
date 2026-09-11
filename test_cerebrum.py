@@ -696,7 +696,7 @@ try:
         return path
     before = manifest(v)
     good = draft("A song prompt names its verse, chorus and tempo. [S1]")
-    ops = write_plan(os.path.join(tmp10, "p.tsv"), [f"synthesize\t3 RESOURCES/Songs — synthesis.md\t{good}"])
+    ops = write_plan(os.path.join(tmp10, "p.tsv"), [f"synthesize\t3 RESOURCES/Songs — synthesis.md\t{good}\t{C.sha256(good)}"])
     check("a synthesis whose every paragraph cites an unchanged source passes the dry run", C.simulate(v, ops, before)[0] == [])
     undo10 = os.path.join(tmp10, "u.tsv")
     ok, f, _ = C.apply_plan(v, ops, before, C._scratch_trash_fn(os.path.join(tmp10, "_t")), undo10)
@@ -704,7 +704,7 @@ try:
           ok and open(os.path.join(v, "3 RESOURCES", "Songs — synthesis.md"), "rb").read() == open(good, "rb").read()
           and open(os.path.join(v, "3 RESOURCES", "Songs.md"), "rb").read() == songs)
     check("undo removes exactly the synthesis", C.undo_plan(v, undo10) == [] and C._verify(v, before)[0])
-    refused = lambda path: C.simulate(v, write_plan(os.path.join(tmp10, "q.tsv"), [f"synthesize\t3 RESOURCES/S.md\t{path}"]), before)[0]
+    refused = lambda path: C.simulate(v, write_plan(os.path.join(tmp10, "q.tsv"), [f"synthesize\t3 RESOURCES/S.md\t{path}\t{C.sha256(path)}"]), before)[0]
     check("traceability red: a paragraph that cites nothing is a new claim", any("cites nothing" in e for e in refused(
         draft("A cited claim. [S1]\n\nAn uncited claim, a new one."))))
     check("traceability red: a source changed since it was cited", any("changed since it was cited" in e for e in refused(
@@ -1062,6 +1062,77 @@ try:
     check("`at` without a destination is refused", any("`at`" in p for p in SEM.effective(v, ocfg, base + [rec(v, "# INBOX/Two.md", "P000"), bad2])[1]))
 finally:
     shutil.rmtree(tmp20, ignore_errors=True)
+
+print("== audit fixes: a pinned draft, a live run that needs its rehearsal, links forgiven by pair, undo that verifies ==")
+tmp21 = tempfile.mkdtemp(prefix="cerebrum-audit-")
+try:
+    v, ocfg = organ_vault(tmp21)
+    sha12 = SEM.segment(open(os.path.join(v, "3 RESOURCES", "Songs.md"), "rb").read())[0]["sha"][:12] if "sha" in SEM.segment(b"# a\nb\n")[0] else __import__("hashlib").sha256(SEM.segment(open(os.path.join(v, "3 RESOURCES", "Songs.md"), "rb").read())[0]["bytes"]).hexdigest()[:12]
+    dpath = os.path.join(tmp21, "draft.md")
+    open(dpath, "w").write(f"# S\n\nA claim. [S1]\n\n## Sources\n- [S1] `3 RESOURCES/Songs.md` P000 sha:{sha12} — “Songwriting”\n")
+    pinned = C.sha256(dpath)
+    ops = write_plan(os.path.join(tmp21, "p.tsv"), [f"synthesize\t3 RESOURCES/S.md\t{dpath}\t{pinned}"])
+    before = manifest(v)
+    check("a synthesis draft pinned by its hash passes the dry run", C.simulate(v, ops, before)[0] == [])
+    open(dpath, "a").write("\nA SECOND CLAIM INSERTED AFTER RATIFICATION. [S1]\n")
+    check("the draft edited after the dry run → the dry run refuses it", any("changed since it was pinned" in e for e in C.simulate(v, ops, before)[0]))
+    ok, f, _ = C.apply_plan(v, ops, before, C._scratch_trash_fn(os.path.join(tmp21, "_t")), os.path.join(tmp21, "u.tsv"))
+    check("… and the live run stops before writing it", not ok and any("changed since it was pinned" in x for x in f) and not os.path.exists(os.path.join(v, "3 RESOURCES", "S.md")))
+    try:
+        write_plan(os.path.join(tmp21, "q.tsv"), [f"synthesize\t3 RESOURCES/S.md\t{dpath}"]); unpinned_refused = False
+    except ValueError as e:
+        unpinned_refused = "arity" in str(e)
+    check("a plan with an unpinned synthesize line is refused as bad arity", unpinned_refused)
+    st = os.path.join(tmp21, "state"); os.makedirs(st)
+    plan_file = os.path.join(tmp21, "r.tsv"); write_plan(plan_file, ["mkdir\t2 AREAS/Made"])
+    check("no rehearsal on record → the live run is refused", "no rehearsal" in C.rehearsal_missing(plan_file, st))
+    C.rehearsal_record(plan_file, st, passed=False, frozen_live=True)
+    check("a FAILED rehearsal on record → refused", "FAILED" in C.rehearsal_missing(plan_file, st))
+    C.rehearsal_record(plan_file, st, passed=True, frozen_live=True)
+    check("a PASS rehearsal of these bytes → allowed", C.rehearsal_missing(plan_file, st) == "")
+    open(plan_file, "a").write("mkdir\t2 AREAS/More\n")
+    check("the plan edited after its rehearsal → refused (different bytes)", C.rehearsal_missing(plan_file, st) != "")
+    v2, cfg2 = organ_vault(tempfile.mkdtemp(prefix="cerebrum-links-", dir=tmp21))
+    open(os.path.join(v2, "3 RESOURCES", "Old.md"), "w").write("see [[Gone Note]]\n")
+    cfg2["accepted"]["broken_links"] = [{"in": "3 RESOURCES/Old.md", "to": "Gone Note"}]
+    links = [r for r in K.RULES if r.name == "every link names one note"][0]
+    check("the accepted pair passes", links.fn(K.Vault(v2, cfg2)) == [])
+    open(os.path.join(v2, "# INBOX", "New.md"), "w").write("also [[Gone Note]]\n")
+    check("a NEW link to the same missing name, from another note, is caught", any("New.md" in p for p in links.fn(K.Vault(v2, cfg2))))
+    exc = [r for r in K.RULES if r.name == "every accepted exception still applies"][0]
+    os.remove(os.path.join(v2, "# INBOX", "New.md"))
+    check("the exception still applies while the note still links to the missing target", not any("broken link" in p for p in exc.fn(K.Vault(v2, cfg2))))
+    open(os.path.join(v2, "3 RESOURCES", "Old.md"), "w").write("nothing linked now\n")
+    check("… and is stale once the note no longer links there", any("no longer links" in p for p in exc.fn(K.Vault(v2, cfg2))))
+    cfg2["accepted"]["broken_links"] = ["Gone Note"]
+    check("an acceptance by bare name is refused as malformed", any("must be a pair" in p for p in exc.fn(K.Vault(v2, cfg2))))
+    open(os.path.join(v2, "# INBOX", "Secret.md"), "w").write("password: x [[Nowhere At All]]\n")
+    cfg2["accepted"]["broken_links"] = []
+    check("a dangling link inside the sensitive note is not read", not any("Secret.md" in p for p in links.fn(K.Vault(v2, cfg2))))
+    check("the registry does not count the sensitive note", "Secret.md" not in REG.build(v2, dict(cfg2, registry="2 AREAS/REG.md")))
+    v3, cfg3 = organ_vault(tempfile.mkdtemp(prefix="cerebrum-undo-", dir=tmp21))
+    ops3 = write_plan(os.path.join(tmp21, "m.tsv"), ["mkdir\t2 AREAS/Made"]); b3 = manifest(v3)
+    bpath = os.path.join(tmp21, "before.tsv"); open(bpath, "w").write("".join(f"{h}\t{s}\t{p}\n" for h, s, p in b3))
+    ok3, _, _ = C.apply_plan(v3, ops3, b3, C._scratch_trash_fn(os.path.join(tmp21, "_t3")), os.path.join(tmp21, "u3.tsv"), before_path=bpath)
+    check("the undo log names the manifest the run was planned against", ok3 and C.undo_before_path(os.path.join(tmp21, "u3.tsv")) == bpath)
+    import subprocess as _sp
+    real_run = _sp.run
+    def _boom(*a, **k): raise FileNotFoundError("pgrep")
+    _sp.run = _boom
+    try:
+        check("when it cannot ask whether Obsidian runs, the guard says it does", C._obsidian_running() is True)
+    finally:
+        _sp.run = real_run
+    s_, root_, cfg_ = K._scratch()
+    try:
+        law_p = os.path.join(root_, cfg_["law"]); txt = open(law_p).read()
+        open(law_p, "w").write(txt.replace("**Where.** `2 AREAS/META/`", "**Where.** `3 RESOURCES/`") + "\n(a mention of 2 AREAS/META elsewhere)\n")
+        law_rule = [r for r in K.RULES if r.name == "the law is where it says it is"][0]
+        check("a law that mentions its folder but says it lives elsewhere fails M2", law_rule.fn(K.Vault(root_, cfg_)) != [])
+    finally:
+        shutil.rmtree(s_, ignore_errors=True)
+finally:
+    shutil.rmtree(tmp21, ignore_errors=True)
 
 print("== registry: a live note inside its archived original is not proposed for removal ==")
 s, root, cfg = K._scratch()

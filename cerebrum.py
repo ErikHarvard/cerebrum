@@ -100,8 +100,9 @@ def _obsidian_running():
     try:
         return subprocess.run(["pgrep", "-x", "obsidian"],
                               capture_output=True).returncode == 0
-    except Exception:
-        return False
+    except Exception as e:                       # no pgrep, or it failed: assume it IS running — refuse, never pass silently
+        print(f"           ⚠ could not ask whether Obsidian runs ({e}); assuming it does", file=sys.stderr)
+        return True
 
 # ---- snapshot ----------------------------------------------------------------
 def take_snapshot(vault):
@@ -506,7 +507,7 @@ def cmd_selftest(_a):
 #   <spec>: comma-separated parts (P012), runs of parts (P011-P022) or line ranges (L1542-L1600),
 #   from `semantics.py segment`, in the order they are to appear.
 ARITY = {"mkdir": 1, "rmdir": 1, "trash": 1, "mv": 2, "append": 3,
-         "compose": 3, "extend": 3, "insert": 4, "leave": 2, "partition": 2, "synthesize": 2, "dedupe": 2}
+         "compose": 3, "extend": 3, "insert": 4, "leave": 2, "partition": 2, "synthesize": 3, "dedupe": 2}
 
 def load_plan(path):
     ops = []
@@ -633,6 +634,8 @@ def simulate(vault, ops, before_rows):
                     data = fh.read()
             except OSError as e:
                 errors.append(f"line {n}: synthesis draft unreadable: {e}"); continue
+            if hashlib.sha256(data).hexdigest() != args[2]:
+                errors.append(f"line {n}: the synthesis draft changed since it was pinned — re-read it and re-plan: {args[1]}"); continue
             probs = semantics.check_synthesis(data, lambda p: content(p) if p in files else None)
             if probs:
                 errors += [f"line {n}: synthesis {args[0]}: {p}" for p in probs]; continue
@@ -828,7 +831,7 @@ def _log(fh, *fields):
     fh.write("\t".join([datetime.now().isoformat(timespec="seconds"), *map(str, fields)]) + "\n")
     fh.flush(); os.fsync(fh.fileno())
 
-def apply_plan(vault, ops, before_rows, trash_fn, undo_path, frozen_live=False):
+def apply_plan(vault, ops, before_rows, trash_fn, undo_path, frozen_live=False, before_path=""):
     """Act on the plan. Every op is logged BEFORE it runs and re-sensed after — an organ
     reports what happened, never that it ran. Stops at the first surprise, then verifies
     the whole vault against expectations derived before anything moved."""
@@ -837,7 +840,7 @@ def apply_plan(vault, ops, before_rows, trash_fn, undo_path, frozen_live=False):
         return False, ["refused — the dry run has errors:"] + errors, expect
     J = lambda p: os.path.join(vault, p)
     with open(undo_path, "a", encoding="utf-8") as log:
-        _log(log, "plan-begin", vault)
+        _log(log, "plan-begin", vault, before_path or "")
         for n, op, args in ops:
             try:
                 if op == "mkdir":
@@ -892,10 +895,12 @@ def apply_plan(vault, ops, before_rows, trash_fn, undo_path, frozen_live=False):
                     with open(os.path.expanduser(args[1]), "rb") as fh:
                         data = fh.read()
                     made = hashlib.sha256(data).hexdigest()
+                    if made != args[2]:
+                        return False, [f"line {n}: stopped — the synthesis draft changed since it was pinned: {args[1]}"], expect
                     _log(log, "synthesize", dst, made)
                     with open(J(dst), "xb") as fh:
                         fh.write(data); fh.flush(); os.fsync(fh.fileno())
-                    ok = sha256(J(dst)) == made          # a draft changed since the dry run fails the verify
+                    ok = sha256(J(dst)) == made          # the draft is pinned in the plan line; written bytes must equal it
                 elif op == "dedupe":
                     src, arc = args
                     import semantics
@@ -967,7 +972,16 @@ def apply_plan(vault, ops, before_rows, trash_fn, undo_path, frozen_live=False):
                            frozen_live=frozen_live, expected_added=expect.get("added"))
     return ok, findings, expect
 
-def undo_plan(vault, undo_path):
+def undo_before_path(undo_path):
+    """The before-manifest the run was planned against, if the log names it."""
+    with open(undo_path, encoding="utf-8") as fh:
+        for l in fh:
+            f = l.rstrip("\n").split("\t")
+            if len(f) >= 4 and f[1] == "plan-begin":
+                return f[3]
+    return ""
+
+def undo_plan(vault, undo_path, trash_fn=None):
     """Reverse an applied plan from its undo log, newest first. Each step checks the state
     before acting, so a half-finished run (a crash between a log line and its op) undoes
     cleanly. Returns notes on anything it could not restore."""
@@ -1026,7 +1040,10 @@ def undo_plan(vault, undo_path):
             dst, made = args[0], args[1]
             if os.path.lexists(J(dst)):
                 if sha256(J(dst)) == made:
-                    os.remove(J(dst))
+                    if op == "synthesize" and trash_fn:      # its bytes came from outside the vault: trash, never rm
+                        trash_fn(J(dst))
+                    else:
+                        os.remove(J(dst))
                 else:
                     notes.append(f"{dst} changed after the merge — left in place")
         elif op == "trash":
@@ -1041,6 +1058,33 @@ def undo_plan(vault, undo_path):
             else:
                 notes.append(f"could not restore {p} — recover it from the trash or the snapshot")
     return notes
+
+def plan_sha(plan_path):
+    with open(plan_path, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
+
+def rehearsal_record(plan_path, state, passed, frozen_live):
+    """rehearse.py writes this; the live run requires it: the verdict, pinned to the plan's bytes."""
+    sha = plan_sha(plan_path)
+    p = os.path.join(state, f"rehearsal-{sha[:12]}.json")
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump({"plan": os.path.abspath(plan_path), "sha256": sha, "pass": bool(passed),
+                   "frozen_live": bool(frozen_live), "when": ts()}, fh, indent=1)
+    return p
+
+def rehearsal_missing(plan_path, state):
+    """Why a plan may not run live: no PASS rehearsal is on record for these exact plan bytes."""
+    sha = plan_sha(plan_path)
+    p = os.path.join(state, f"rehearsal-{sha[:12]}.json")
+    if not os.path.isfile(p):
+        return "no rehearsal on record for this plan (its bytes)"
+    with open(p, encoding="utf-8") as fh:
+        r = json.load(fh)
+    if r.get("sha256") != sha:
+        return "the rehearsal on record is of different plan bytes"
+    if not r.get("pass"):
+        return f"the rehearsal on record FAILED ({r.get('when')})"
+    return ""
 
 def snapshot_stale(snaps, state):
     """§VII.1: a snapshot taken since the last pass must exist before a plan runs. Returns the
@@ -1091,6 +1135,12 @@ def cmd_move(a):
     stale = snapshot_stale(SNAPS, STATE)
     if real and stale:
         print(f"move: refused. {stale} — the law's step 1: snapshot before any move (cerebrum.py snapshot)."); return 2
+    if real:
+        why = rehearsal_missing(a.plan, STATE)
+        if why:
+            print(f"move: refused. {why} — rehearse it first (python3 rehearse.py --plan {a.plan})."); return 2
+        if cmd_selftest(None) != 0:
+            print("move: refused. The verifier did not prove itself red-capable."); return 2
     pre_ok, pre = _verify(VAULT, before_rows, frozen_live=a.frozen_live)
     if not pre_ok:
         print("move: refused. The vault no longer matches the before-manifest:")
@@ -1104,7 +1154,7 @@ def cmd_move(a):
     trash_fn = _gio_trash if real else _scratch_trash_fn(
         os.path.join(os.path.dirname(os.path.abspath(VAULT)), "_trash"))
     ok, findings, _ = apply_plan(VAULT, ops, before_rows, trash_fn, undo_path,
-                                 frozen_live=a.frozen_live)
+                                 frozen_live=a.frozen_live, before_path=os.path.abspath(a.before))
     print(f"move     : undo log   {undo_path}")
     print(f"           expected   {STATE}/expect-{stamp}.json")
     print("move     : " + ("GREEN — applied and verified against the plan" if ok else "RED"))
@@ -1119,10 +1169,19 @@ def cmd_undo(a):
         print("undo: refused on the live vault without --i-ratified."); return 2
     if real and _obsidian_running():
         print("undo: refused. Close Obsidian first."); return 2
-    notes = undo_plan(VAULT, a.log)
+    notes = undo_plan(VAULT, a.log, trash_fn=_trash if real else None)
     print("undo     : done" + (" — with notes:" if notes else ""))
     for n in notes:
         print("   " + n)
+    bp = undo_before_path(a.log)
+    if bp and os.path.isfile(bp):
+        ok, fs = _verify(VAULT, _read_manifest(bp), frozen_live=True)
+        print("undo     : " + ("verified — the vault equals the manifest the run was planned against" if ok
+                               else "RED — the vault does not equal its before-manifest:"))
+        if not ok:
+            _print_findings(fs, limit=20)
+        return 0 if ok and not notes else 1
+    print("undo     : not verified — the log names no before-manifest (a run older than this check)")
     return 1 if notes else 0
 
 def loss_since(vault, manifest_path, frozen=lambda p: False):

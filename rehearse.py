@@ -141,6 +141,8 @@ def main():
           + ("  (--frozen-live)" if a.frozen_live else ""))
     ok = rehearse(a.plan, C.VAULT, frozen_live=a.frozen_live, keep=a.keep,
                   snapshot=not a.no_snapshot)
+    rec = C.rehearsal_record(a.plan, C.STATE, ok, a.frozen_live)
+    print(f"rehearse : on record → {rec}")
     print("rehearse : " + ("PASS — proven on a copy; run it live with cerebrum.py move --apply --i-ratified"
                            if ok else "FAIL — do not run this plan live"))
     return 0 if ok else 1

@@ -1,3 +1,4 @@
+import re
 #!/usr/bin/env python3
 """
 registry.py — the vault's registry: every note and meta-note, generated from the files themselves.
@@ -52,7 +53,8 @@ def build(root, cfg):
     reg = cfg.get("registry", "")
     title = os.path.splitext(os.path.basename(reg))[0] or "Registry"
     meta = lambda p: any(p.startswith(d + "/") for d in cfg.get("meta_dirs", []))
-    notes = [p for p in v.movable if K.MD(p) and p != reg]
+    sensitive = set(v.accepted.get("sensitive", []))            # never opened, never counted
+    notes = [p for p in v.movable if K.MD(p) and p != reg and p not in sensitive]
     text = {p: v.text(p) for p in notes}
 
     by_name = defaultdict(list)
@@ -71,7 +73,7 @@ def build(root, cfg):
 
     by_hash = defaultdict(list)
     for p in v.movable:
-        if p != reg and os.path.getsize(os.path.join(root, p)) > 0:
+        if p != reg and p not in sensitive and os.path.getsize(os.path.join(root, p)) > 0:
             by_hash[v.hash(p)].append(p)
     twins = {p: [q for q in ps if q != p] for ps in by_hash.values() if len(ps) > 1 for p in ps}
 
@@ -89,7 +91,7 @@ def build(root, cfg):
         if f < 0.99 and q in contained and contained[q][1] == p and contained[q][0] >= 0.99:
             del contained[p]
 
-    done = sorted(p for p in notes if meta(p) and _frontmatter(text[p]).get("status", "").upper().startswith("EXECUTED"))
+    done = sorted(p for p in notes if meta(p) and re.search(r"\b(EXECUTED|RUN|APPLIED)\b", _frontmatter(text[p]).get("status", "").upper()))
     homes = Counter(p.split("/")[0] for p in notes)
     groups = sorted({tuple(sorted([p] + qs)) for p, qs in twins.items()})
     accepted = set(v.accepted.get("duplicates", []))
