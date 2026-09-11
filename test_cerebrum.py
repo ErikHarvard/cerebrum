@@ -791,6 +791,43 @@ try:
 finally:
     shutil.rmtree(tmp13, ignore_errors=True)
 
+print("== the keeper's ruling: a disputed note follows the reader the person chose — and nothing else ==")
+tmp13b = tempfile.mkdtemp(prefix="cerebrum-ruling-")
+try:
+    v, ocfg = organ_vault(tmp13b)
+    base = [r for r in keep_all(v, ocfg) if r["note"] != "# INBOX/Two.md"]
+    to_beta = rec(v, "# INBOX/Two.md", "P001", dest="2 AREAS/Beta.md")
+    eB = SEM.effective(v, ocfg, base + [rec(v, "# INBOX/Two.md", "P000"), to_beta])[0]
+    eP = SEM.effective(v, ocfg, base + [rec(v, "# INBOX/Two.md", "P000", dest="3 RESOURCES/Elsewhere.md"), to_beta])[0]
+    check("before the ruling the WHERE dispute blocks the note",
+          SEM.agree_detail(v, eP, eB)[1] != [] and not any("Two" in x for x in
+              SEM.propose(v, ocfg, *SEM.agree_detail(v, eP, eB)[:2], today="2026-01-01")[0]))
+    rl = [{"note": "# INBOX/Two.md", "reader": "A", "why": "the keeper says P000 is a resource", "_at": "r:1"}]
+    A2, B2, ruled, probs = SEM.rule(v, eP, eB, rl)
+    agreed, runs, _ = SEM.agree_detail(v, A2, B2)
+    plan = SEM.propose(v, ocfg, agreed, runs, today="2026-01-01")[0]
+    check("ruled for A: the dispute is gone and A's placement is in the plan",
+          probs == [] and len(ruled) == 1 and runs == [] and any("Elsewhere.md" in x for x in plan)
+          and C.simulate(v, write_plan(os.path.join(tmp13b, "p.tsv"), plan), manifest(v))[0] == [])
+    A3, B3, _, probs3 = SEM.rule(v, eP, eB, [dict(rl[0], reader="B")])
+    plan3 = SEM.propose(v, ocfg, *SEM.agree_detail(v, A3, B3)[:2], today="2026-01-01")[0]
+    check("ruled for B: B's placement instead, and nothing of A's",
+          probs3 == [] and not any("Elsewhere.md" in x for x in plan3) and any("Beta.md" in x for x in plan3))
+    undisputed = next(r["note"] for r in base)
+    for bad, label in ((dict(rl[0], note=undisputed), "a ruling on a note the readers did not dispute"),
+                       (dict(rl[0], reader="C"), "a ruling for a reader that does not exist"),
+                       (dict(rl[0], why=""), "a ruling without its reason"),
+                       (dict(rl[0], note="3 RESOURCES/Nowhere.md"), "a ruling on a note not read by both")):
+        A4, B4, ruled4, probs4 = SEM.rule(v, eP, eB, [rl[0], bad])
+        check(f"{label} is refused — and then NOTHING is ruled",
+              len(probs4) == 1 and ruled4 == [] and A4 is eP and B4 is eB)
+    rp = os.path.join(tmp13b, "rulings.tsv")
+    open(rp, "w", encoding="utf-8").write("# a comment\n\n# INBOX/Two.md\tA\tthe keeper says so\n")
+    check("a rulings file loads: comments and blank lines skipped, fields stripped",
+          [(x["note"], x["reader"], x["why"]) for x in SEM.load_rulings(rp)] == [("# INBOX/Two.md", "A", "the keeper says so")])
+finally:
+    shutil.rmtree(tmp13b, ignore_errors=True)
+
 print("== a path vacated and filled again: a split note's own lines recomposed where it was ==")
 tmp14 = tempfile.mkdtemp(prefix="cerebrum-reuse-")
 try:

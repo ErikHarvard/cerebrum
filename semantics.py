@@ -567,6 +567,43 @@ def agree(vault, effA, effB):
     """(agreed, place disputes) — see agree_detail."""
     return agree_detail(vault, effA, effB)[:2]
 
+# ---- the keeper's ruling: a dispute resolved by the person, recorded as data ----------------
+def load_rulings(path):
+    """TSV, one ruling per line: note <TAB> reader (A|B) <TAB> why. A `#` line with no tab is a
+    comment — a note path may itself begin with `#` (the inbox does)."""
+    out = []
+    with open(os.path.expanduser(path), encoding="utf-8") as fh:
+        for n, line in enumerate(fh, 1):
+            if not line.strip() or (line.startswith("#") and "\t" not in line):
+                continue
+            f = line.rstrip("\n").split("\t")
+            out.append({"note": f[0].strip(), "reader": f[1].strip() if len(f) > 1 else "",
+                        "why": f[2].strip() if len(f) > 2 else "", "_at": f"{os.path.basename(path)}:{n}"})
+    return out
+
+def rule(vault, effA, effB, rulings):
+    """The keeper resolves a dispute by choosing one reader's reading of a note; that reading then
+    stands for both, and the plan follows. A ruling reaches only a note the readers disputed — on
+    WHERE or on WHAT ELSE — and both read: it cannot put an op into the plan that neither reader
+    proposed, nor decide what was never in question, and it must say why. Returns
+    (effA, effB, ruled, problems); on any problem nothing is ruled."""
+    _, runs, acts = agree_detail(vault, effA, effB)
+    disputed = {x["note"] for x in runs} | {x["note"] for x in acts}
+    probs, ruled, A, B = [], [], dict(effA), dict(effB)
+    for r in rulings:
+        note, who, at = r["note"], r["reader"], r.get("_at", "a ruling")
+        if who not in ("A", "B"):
+            probs.append(f"{at}: reader must be A or B, not {who!r}"); continue
+        if note not in effA or note not in effB:
+            probs.append(f"{at}: {note}: not read by both readers"); continue
+        if note not in disputed:
+            probs.append(f"{at}: {note}: the readers did not dispute it — nothing to rule"); continue
+        if not r.get("why"):
+            probs.append(f"{at}: {note}: a ruling needs its reason"); continue
+        A[note] = B[note] = (effA if who == "A" else effB)[note]
+        ruled.append(dict(r))
+    return (A, B, ruled, probs) if not probs else (effA, effB, [], probs)
+
 # ---- the proposal: a plan made only of what both readings agree on ------------------------------
 def _spec(lines):
     runs = []
@@ -773,7 +810,9 @@ USAGE = """semantics.py — the semantic organ
   index                      triage: sections + local embeddings → state/sema/index-<ts>.{json,md}
   reading  <A>               coverage of one reading (a .jsonl file, or a folder of them)
   reading  <file> --slice <slices.json> <id>   coverage of one reader's slice: its units, every line once
-  propose  <A> <B>           coverage of both → agreement → plan + proposal in state/sema/ → dry run
+  propose  <A> <B> [--ruling <rulings.tsv>]
+                             coverage of both → (the keeper's rulings on disputed notes: note TAB A|B TAB why)
+                             → agreement → plan + proposal in state/sema/ → dry run
   converge <expect.json> <A> <B>   after a plan ran: its notes, read again, must need nothing more
   second   <A> [<B so far>]  the second reader's worklist: every change A proposes, the notes it would
                              change into, a sample of A's keeps → state/sema/slices-B.json
@@ -834,7 +873,9 @@ def cmd_second(V, cfg, argv):
 
 def cmd_propose(V, cfg, argv):
     """Coverage of both readings — the second may be partial if it covers every change the first
-    proposes — then agreement, the plan, its dry run, and the proposal a person reads."""
+    proposes — then the keeper's rulings if any, agreement, the plan, its dry run, and the proposal
+    a person reads."""
+    rulings = load_rulings(argv[4]) if argv[3:4] == ["--ruling"] else []
     recsA, recsB = load_reading(argv[1]), load_reading(argv[2])
     inB = sorted({r.get("note") for r in recsB} & set(scope(V, cfg)))
     effs = []
@@ -857,15 +898,26 @@ def cmd_propose(V, cfg, argv):
             print("   " + n)
         if missing:
             return 1
+    ruled = []
+    if rulings:
+        effA, effB, ruled, probs = rule(V, effA, effB, rulings)
+        print(f"ruling   : {argv[4]} — " + (f"{len(ruled)} note(s) ruled" if not probs else f"{len(probs)} problem(s)"))
+        for p in probs[:20]:
+            print("   " + p)
+        if probs:
+            return 1
     agreed, runs, act_runs = agree_detail(V, effA, effB)
     plan, rep = propose(V, cfg, agreed, runs)
-    rep["act_disputes"] = act_runs
+    rep["act_disputes"], rep["rulings"] = act_runs, ruled
     base = os.path.join(sema_dir(), f"proposal-{C.ts()}")
     with open(base + ".tsv", "w", encoding="utf-8") as fh:
         fh.write("# the organ's plan — proposed, NOT ratified\n" + "".join(l + "\n" for l in plan))
     errors = C.simulate(V, C.load_plan(base + ".tsv"), C.manifest_rows(V))[0] if plan else []
     md = proposal_md(rep, base + ".tsv", errors, sum(len(a) for a in agreed.values()),
                      sum(len(nonblank(V, r)) for r in agreed))
+    if ruled:
+        md += ("\n## The keeper ruled — one reader's reading stands for both\n\n"
+               + "\n".join(f"- `{x['note']}` — reader {x['reader']}: {x['why']}" for x in ruled) + "\n")
     md += ("\n## The readers agree where the lines go, but not on what else to do — so it is not done\n\n"
            + ("\n".join(f"- `{x['note']}` L{x['first']}–L{x['last']} — A: {x['a']['op']} ({x['a'].get('why', '')}) · "
                         f"B: {x['b']['op']} ({x['b'].get('why', '')})" for x in act_runs) or "- none") + "\n")
@@ -966,7 +1018,7 @@ def main(argv):
         return 0 if not probs else 1
     if argv[:1] == ["second"] and len(argv) in (2, 3):
         return cmd_second(V, cfg, argv)
-    if argv[:1] == ["propose"] and len(argv) == 3:
+    if argv[:1] == ["propose"] and (len(argv) == 3 or (len(argv) == 5 and argv[3] == "--ruling")):
         return cmd_propose(V, cfg, argv)
     if argv[:1] == ["converge"] and len(argv) == 4:
         with open(argv[1], encoding="utf-8") as fh:
