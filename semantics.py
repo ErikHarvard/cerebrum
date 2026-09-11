@@ -664,6 +664,29 @@ def propose(vault, cfg, agreed, runs, today=None):
                   "parallax": sum(1 for rel in place for r in {id(x): x for x in agreed[rel].values()}.values()
                                   if r.get("relation") == "parallax")}
 
+# ---- a second read of part of the vault ------------------------------------------------------
+def second_read_set(vault, cfg, effA, sample=0.15, seed=11, done=()):
+    """When the first reader read everything, the second must read: every note the first wants to
+    change or act on, and every existing note it would put lines into — no change runs without both
+    readers — plus a seeded sample of the notes the first keeps, to measure how far its 'keep' can
+    be trusted. `done`: notes the second reader has already read. Returns (must, sampled)."""
+    import random
+    must = set()
+    for rel, assign in effA.items():
+        for r in {id(x): x for x in assign.values()}.values():
+            d = final_dest(r, rel)
+            if r["op"] != "keep" or d != rel:
+                must.add(rel)
+                if d != rel and os.path.isfile(os.path.join(vault, d)):
+                    must.add(d)
+    keeps = sorted(set(effA) - must - set(done))
+    k = min(len(keeps), max(1, round(len(keeps) * sample))) if keeps and sample else 0
+    return sorted(must), sorted(random.Random(seed).sample(keeps, k))
+
+def second_read_missing(vault, cfg, effA, effB):
+    """The gate on a partial second read: the notes it had to read and did not."""
+    return [n for n in second_read_set(vault, cfg, effA, sample=0)[0] if n not in effB]
+
 # ---- convergence: the pass closes, or it did not ---------------------------------------------
 def converge_targets(cfg, expect):
     """Every note a plan made, changed or moved — outside the archive, which keeps originals."""
@@ -741,7 +764,112 @@ USAGE = """semantics.py — the semantic organ
   reading  <file> --slice <slices.json> <id>   coverage of one reader's slice: its units, every line once
   propose  <A> <B>           coverage of both → agreement → plan + proposal in state/sema/ → dry run
   converge <expect.json> <A> <B>   after a plan ran: its notes, read again, must need nothing more
+  second   <A> [<B so far>]  the second reader's worklist: every change A proposes, the notes it would
+                             change into, a sample of A's keeps → state/sema/slices-B.json
 """
+
+def make_slices(vault, notes, budget=330_000, prefix="s"):
+    """Pack notes into readers' slices of at most `budget` bytes, largest first. A note over the budget
+    is cut at its parts (a part over the budget, at its lines) into line ranges covering it once."""
+    units = []
+    for n in sorted(notes, key=lambda n: -os.path.getsize(os.path.join(vault, n))):
+        data = read_bytes(vault, n)
+        if len(data) <= budget:
+            units.append([n, "*", len(data)]); continue
+        lines, acc, start = data.splitlines(keepends=True), 0, 1
+        for p in segment(data):
+            pieces = [(p["start"], p["end"], len(p["bytes"]))]
+            if len(p["bytes"]) > budget:
+                pieces, a, b = [], p["start"], 0
+                for i in range(p["start"], p["end"] + 1):
+                    b += len(lines[i - 1])
+                    if b >= budget or i == p["end"]:
+                        pieces.append((a, i, b)); a, b = i + 1, 0
+            for s, e, b in pieces:
+                if acc and acc + b > budget:
+                    units.append([n, f"L{start}-L{s - 1}", acc]); start, acc = s, 0
+                acc += b
+        units.append([n, f"L{start}-L{len(lines)}", acc])
+    slices = []
+    for u in sorted(units, key=lambda u: -u[2]):
+        for sl in slices:
+            if sl["bytes"] + u[2] <= budget:
+                sl["units"].append(u[:2]); sl["bytes"] += u[2]; break
+        else:
+            slices.append({"units": [u[:2]], "bytes": u[2]})
+    for i, sl in enumerate(slices, 1):
+        sl["id"] = f"{prefix}{i:02d}"
+    return slices
+
+def cmd_second(V, cfg, argv):
+    """The second reader's worklist, sliced: what it must read, and a sample of the first's keeps."""
+    effA, probs = effective(V, cfg, load_reading(argv[1]))
+    if probs:
+        print(f"second   : the first reading is incomplete — {len(probs)} problem(s)")
+        for p in probs[:20]:
+            print("   " + p)
+        return 1
+    done = sorted({r.get("note") for r in load_reading(argv[2])} & set(effA)) if len(argv) == 3 else []
+    must, sampled = second_read_set(V, cfg, effA, done=done)
+    todo = [n for n in must + sampled if n not in done]
+    slices, d = make_slices(V, todo, prefix="b"), sema_dir()
+    with open(os.path.join(d, "slices-B.json"), "w", encoding="utf-8") as fh:
+        json.dump(slices, fh, ensure_ascii=False, indent=1)
+    with open(os.path.join(d, "second-read.json"), "w", encoding="utf-8") as fh:
+        json.dump({"must": must, "sampled": sampled, "done": done}, fh, ensure_ascii=False, indent=1)
+    print(f"second   : must {len(must)} · sampled keeps {len(sampled)} · already read {len(done)} → "
+          f"{len(todo)} note(s) in {len(slices)} slice(s) → {os.path.join(d, 'slices-B.json')}")
+    return 0
+
+def cmd_propose(V, cfg, argv):
+    """Coverage of both readings — the second may be partial if it covers every change the first
+    proposes — then agreement, the plan, its dry run, and the proposal a person reads."""
+    recsA, recsB = load_reading(argv[1]), load_reading(argv[2])
+    inB = sorted({r.get("note") for r in recsB} & set(scope(V, cfg)))
+    effs = []
+    for path, recs, notes in ((argv[1], recsA, None), (argv[2], recsB, inB)):
+        eff, probs = effective(V, cfg, recs, notes=notes)
+        print(f"coverage : {path} — " + ("every line placed once" if not probs else f"{len(probs)} problem(s)"))
+        for p in probs[:20]:
+            print("   " + p)
+        if probs:
+            return 1
+        effs.append(eff)
+    effA, effB = effs
+    partial = set(effB) != set(effA)
+    if partial:
+        missing = second_read_missing(V, cfg, effA, effB)
+        print(f"second   : {len(effB)} of {len(effA)} notes read twice — " + (
+            "it covers every change the first read proposes" if not missing
+            else f"it MISSES {len(missing)} note(s) the first read would change"))
+        for n in missing[:20]:
+            print("   " + n)
+        if missing:
+            return 1
+    agreed, runs = agree(V, effA, effB)
+    plan, rep = propose(V, cfg, agreed, runs)
+    base = os.path.join(sema_dir(), f"proposal-{C.ts()}")
+    with open(base + ".tsv", "w", encoding="utf-8") as fh:
+        fh.write("# the organ's plan — proposed, NOT ratified\n" + "".join(l + "\n" for l in plan))
+    errors = C.simulate(V, C.load_plan(base + ".tsv"), C.manifest_rows(V))[0] if plan else []
+    md = proposal_md(rep, base + ".tsv", errors, sum(len(a) for a in agreed.values()),
+                     sum(len(nonblank(V, r)) for r in agreed))
+    if partial:
+        must = set(second_read_set(V, cfg, effA, sample=0)[0])
+        checked = set(effB) - must
+        kept = len(checked - {r["note"] for r in runs})
+        rep["read_once"], rep["keep_check"] = len(set(effA) - set(effB)), [kept, len(checked)]
+        md = md.replace("Read twice, independently:", "Read twice where it mattered:", 1).replace("\n\n", (
+            f"\n\nThe first reader read every note. The second re-read every note the first would change or put "
+            f"lines into, and {len(checked)} of the notes it kept — agreeing on {kept} of them. "
+            f"{rep['read_once']} notes were read once, and stay as they are.\n\n"), 1)
+    with open(base + ".md", "w", encoding="utf-8") as fh:
+        fh.write(md)
+    with open(base + ".json", "w", encoding="utf-8") as fh:
+        json.dump(rep, fh, ensure_ascii=False, indent=1, default=str)
+    print(f"propose  : {len(runs)} dispute(s) · {len(plan)} plan line(s) · dry run "
+          + ("OK" if not errors else f"REFUSED ({len(errors)})") + f" → {base}.md")
+    return 0 if not errors else 1
 
 def slice_problems(vault, cfg, recs, units):
     """One reader's slice: each unit is a whole note ("*") or a line range of one. Every line of every
@@ -821,30 +949,10 @@ def main(argv):
         for p in probs[:40]:
             print("   " + p)
         return 0 if not probs else 1
+    if argv[:1] == ["second"] and len(argv) in (2, 3):
+        return cmd_second(V, cfg, argv)
     if argv[:1] == ["propose"] and len(argv) == 3:
-        effs = []
-        for path in argv[1:]:
-            eff, probs = effective(V, cfg, load_reading(path))
-            print(f"coverage : {path} — " + ("every line placed once" if not probs else f"{len(probs)} problem(s)"))
-            for p in probs[:20]:
-                print("   " + p)
-            if probs:
-                return 1
-            effs.append(eff)
-        agreed, runs = agree(V, *effs)
-        plan, rep = propose(V, cfg, agreed, runs)
-        base = os.path.join(sema_dir(), f"proposal-{C.ts()}")
-        with open(base + ".tsv", "w", encoding="utf-8") as fh:
-            fh.write("# the organ's plan — proposed, NOT ratified\n" + "".join(l + "\n" for l in plan))
-        errors = C.simulate(V, C.load_plan(base + ".tsv"), C.manifest_rows(V))[0] if plan else []
-        total = sum(len(nonblank(V, r)) for r in agreed)
-        with open(base + ".md", "w", encoding="utf-8") as fh:
-            fh.write(proposal_md(rep, base + ".tsv", errors, sum(len(a) for a in agreed.values()), total))
-        with open(base + ".json", "w", encoding="utf-8") as fh:
-            json.dump(rep, fh, ensure_ascii=False, indent=1, default=str)
-        print(f"propose  : {len(runs)} dispute(s) · {len(plan)} plan line(s) · dry run "
-              + ("OK" if not errors else f"REFUSED ({len(errors)})") + f" → {base}.md")
-        return 0 if not errors else 1
+        return cmd_propose(V, cfg, argv)
     if argv[:1] == ["converge"] and len(argv) == 4:
         with open(argv[1], encoding="utf-8") as fh:
             touched = converge_targets(cfg, json.load(fh))

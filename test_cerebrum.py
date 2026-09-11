@@ -733,6 +733,38 @@ try:
 finally:
     shutil.rmtree(tmp11, ignore_errors=True)
 
+print("== a second read of part of the vault: it must cover every change the first proposes ==")
+tmp12 = tempfile.mkdtemp(prefix="cerebrum-second-")
+try:
+    v, ocfg = organ_vault(tmp12)
+    recsA = [r for r in keep_all(v, ocfg) if r["note"] != "# INBOX/Mixed.md"] + [
+        rec(v, "# INBOX/Mixed.md", "P000", "merge", "3 RESOURCES/Songs.md", "="),
+        rec(v, "# INBOX/Mixed.md", "P001", dest="3 RESOURCES/Training.md")]
+    effA = SEM.effective(v, ocfg, recsA)[0]
+    must, sampled = SEM.second_read_set(v, ocfg, effA, sample=0.5, seed=1)
+    check("the notes the first read would change, and the notes it would put lines into, must be read again",
+          must == ["# INBOX/Mixed.md", "3 RESOURCES/Songs.md", "3 RESOURCES/Training.md"])
+    check("a seeded sample of its keeps comes from the rest — the same every time", bool(sampled)
+          and not set(sampled) & set(must) and sampled == SEM.second_read_set(v, ocfg, effA, sample=0.5, seed=1)[1])
+    effB = SEM.effective(v, ocfg, [r for r in recsA if r["note"] in must], notes=must)[0]
+    check("a second read covering every change passes the gate", SEM.second_read_missing(v, ocfg, effA, effB) == [])
+    effB2 = SEM.effective(v, ocfg, [r for r in recsA if r["note"] in must[:2]], notes=must[:2])[0]
+    check("gate red: a second read that skipped a note the first would put lines into",
+          SEM.second_read_missing(v, ocfg, effA, effB2) == ["3 RESOURCES/Training.md"])
+    agreed, runs = SEM.agree(v, effA, effB)
+    plan, _ = SEM.propose(v, ocfg, agreed, runs, today="2026-01-01")
+    check("from a partial second read, the agreed change still makes a plan the mover proves",
+          bool(plan) and C.simulate(v, write_plan(os.path.join(tmp12, "p.tsv"), plan), manifest(v))[0] == [])
+    open(os.path.join(v, "3 RESOURCES", "Big.md"), "w").write(
+        "# A\n" + ("word " * 60 + "\n") * 5 + "# B\n" + ("more " * 60 + "\n") * 5)
+    sl = SEM.make_slices(v, ["3 RESOURCES/Big.md", "3 RESOURCES/Songs.md"], budget=700)
+    got = sorted(l for s in sl for n, spec in s["units"] if n == "3 RESOURCES/Big.md"
+                 for a, b in [[int(x[1:]) for x in spec.split("-")]] for l in range(a, b + 1))
+    check("slices: a note over the budget is cut into line ranges that cover it exactly once; a small one stays whole",
+          got == list(range(1, 13)) and ["3 RESOURCES/Songs.md", "*"] in [u for s in sl for u in s["units"]])
+finally:
+    shutil.rmtree(tmp12, ignore_errors=True)
+
 print("== embedding windows: a character budget, never a word count; no word lost ==")
 dense = " ".join(f"https://example.com/video/BV{i:08d}?spm_id_from=333.337.search-card.all.click" for i in range(300))
 ws = SEM.windows(dense + " " + "x" * 4000)
