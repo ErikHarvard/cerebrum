@@ -2,7 +2,7 @@
    (archivist.py), which captures to the inbox, proposes through the organ, and moves only on the keeper's ratify. */
 const { Plugin, ItemView, Notice, Modal, Setting, PluginSettingTab } = require("obsidian");
 const VIEW = "archivist-page";
-const DEFAULTS = { url: "http://127.0.0.1:8765" };
+const DEFAULTS = { url: "http://127.0.0.1:8765", polish: true };
 
 class ArchivistView extends ItemView {
   constructor(leaf, plugin) { super(leaf); this.plugin = plugin; }
@@ -49,7 +49,8 @@ module.exports = class ArchivistPlugin extends Plugin {
     this.addSettingTab(new (class extends PluginSettingTab {
       constructor(app, plugin) { super(app, plugin); this.plugin = plugin; }
       display() { const c = this.containerEl; c.empty();
-        new Setting(c).setName("Archivist URL").setDesc("Where archivist.py serves").addText(t => t.setValue(this.plugin.settings.url).onChange(async v => { this.plugin.settings.url = v.trim() || DEFAULTS.url; await this.plugin.saveData(this.plugin.settings); })); }
+        new Setting(c).setName("Archivist URL").setDesc("Where archivist.py serves").addText(t => t.setValue(this.plugin.settings.url).onChange(async v => { this.plugin.settings.url = v.trim() || DEFAULTS.url; await this.plugin.saveData(this.plugin.settings); }));
+        new Setting(c).setName("Polish before storing").setDesc("Spelling, grammar and structure by the Archivist; your raw words kept verbatim beneath").addToggle(t => t.setValue(this.plugin.settings.polish !== false).onChange(async v => { this.plugin.settings.polish = v; await this.plugin.saveData(this.plugin.settings); })); }
     })(this.app, this));
   }
   async api(path, body) {
@@ -58,7 +59,7 @@ module.exports = class ArchivistPlugin extends Plugin {
   }
   async capture(title, text, source) {
     new Notice("capturing to the inbox…");
-    const c = await this.api("/api/capture", { title, text, source: source ? `Obsidian: ${source}` : "Obsidian" });
+    const c = await this.api("/api/capture", { title, text, source: source ? `Obsidian: ${source}` : "Obsidian", polish: this.settings.polish !== false });
     if (c.error) { new Notice("! " + c.error); return; }
     new Notice(`captured → ${c.note}. The organ is reading it (a few minutes on the local model); ratify on the Archivist's page.`);
     const r = await this.api("/api/place", { note: c.note });
