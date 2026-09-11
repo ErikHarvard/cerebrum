@@ -173,7 +173,7 @@ def reader_prompt(vault, cfg, note, shortlist, cal, dest_parts, url=None, max_to
     def build(dp, body, pl):
         return (f"NOTE: `{note}`\nParts:\n{pl}\n\nShortlist (nearest notes by meaning):\n{sl}\n{trust}{stays}\n{dp}\n"
                 f"--- the note's text ---\n{body}\n--- end ---\nWrite the records now.")
-    limit = n_ctx(url) - max_tokens - 96
+    limit = min(n_ctx(url), int(CFG.get("prompt_tokens", 6000)) + max_tokens) - max_tokens - 96   # a CPU model slows with context: cap the prompt
     lead = dict(list(dest_parts.items())[:1])
     for dests, cap, pcap in ((dest_parts, 60, 80), (dest_parts, 20, 80), (lead, 20, 60), (lead, 8, 40), ({}, 0, 40), ({}, 0, 20), ({}, 0, 10)):
         dp, pl = dp_text(dests, cap), plist_text(pcap)
