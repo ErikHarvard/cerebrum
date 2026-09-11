@@ -16,6 +16,7 @@ Every rule carries a fixture: it must PASS on a clean scratch vault, then FAIL o
 is planted. `check` runs every fixture before it trusts any verdict — a rule that cannot fail
 is not a rule — then runs the rules on the real vault. A rule that crashes is a FAIL.
 """
+import re
 import os, re, json, shutil, tempfile
 from collections import defaultdict
 import cerebrum as C
@@ -307,6 +308,174 @@ def r_registry(v):
         return [f"never generated: {v.cfg['registry']} — run: cerebrum.py registry --write"]
     return [] if registry.fresh(v.root, v.cfg) else [f"stale: {v.cfg['registry']} — run: cerebrum.py registry --write"]
 
+# ---- Law Revision I (2026-09-11): six rules that were checkable and unchecked ----------------
+def _inbox_archive(v):
+    """The one inbox and the one archive: the first and last PARA folders."""
+    return v.para[0], v.para[-1]
+
+def _plant_second_inbox(v):
+    os.makedirs(os.path.join(v.root, v.para[2], "Inbox"))
+    open(os.path.join(v.root, v.para[2], "Inbox", "x.md"), "w").write("x\n")
+
+@rule("I", "one inbox, one archive",
+      "an inbox of inboxes is dispersal; archiving the archive is the archive — no folder outside the "
+      "frozen register is named like either, except the two", _plant_second_inbox)
+def r_one_inbox(v):
+    inbox, arch = _inbox_archive(v)
+    out = []
+    for r, ds, _ in os.walk(v.root):
+        rel = os.path.relpath(r, v.root)
+        ds[:] = [d for d in ds if not v.is_frozen(os.path.normpath(os.path.join(rel, d)))]
+        for d in ds:
+            p = os.path.normpath(os.path.join(rel, d))
+            if p not in (inbox, arch) and re.search(r"inbox|archive", d, re.I):
+                out.append(f"a second {'inbox' if re.search('inbox', d, re.I) else 'archive'}: {p}")
+    return out
+
+def _plant_deep_file(v):
+    d = os.path.join(v.root, v.para[2], "Container", "Deeper")
+    os.makedirs(d); open(os.path.join(d, "too deep.md"), "w").write("x\n")
+
+@rule("III", "three levels, no deeper",
+      "category → container → note, and no further: a file deeper than that has no one standing", _plant_deep_file)
+def r_three_levels(v):
+    homes = v.para[1:]
+    return [f"deeper than category/container/note: {p}" for p in v.movable
+            if p.split("/")[0] in homes and len(p.split("/")) > 3]
+
+def _plant_empty_folder(v):
+    os.makedirs(os.path.join(v.root, v.para[2], "Nothing here"))
+
+@rule("III", "no empty folder",
+      "L2: a container that holds nothing fails 'what breaks if removed?' — the PARA roots themselves excepted", _plant_empty_folder)
+def r_no_empty(v):
+    out = []
+    for r, ds, fs in os.walk(v.root):
+        rel = os.path.relpath(r, v.root)
+        ds[:] = [d for d in ds if not v.is_frozen(os.path.normpath(os.path.join(rel, d)))]
+        if rel != "." and rel not in v.para and not ds and not fs:
+            out.append(f"empty folder: {rel}")
+    return out
+
+def law_rule_names(text):
+    """The rule names the law's §XV table claims, in its 'Rules' column: cells split on ' · '."""
+    sec = _section(text, "XV")
+    names = set()
+    for line in sec.splitlines():
+        if line.startswith("| **"):
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if cells and cells[-1]:
+                names |= {x.strip() for x in cells[-1].split("·") if x.strip()}
+    return names
+
+def law_plan_ops(text):
+    """The operations the law's plan-language table (§VII) names: the first backticked word of each row."""
+    return {m.group(1) for m in re.finditer(r"^\| `([a-z]+)\b", _section(text, "VII"), re.M)}
+
+def _section(text, roman):
+    m = re.search(rf"^## {roman}\. .*?$", text, re.M)
+    if not m:
+        return ""
+    rest = text[m.end():]
+    n = re.search(r"^## ", rest, re.M)
+    return rest[:n.start()] if n else rest
+
+def _plant_renamed_rule(v):
+    p = os.path.join(v.root, v.cfg["law"])
+    t = open(p, encoding="utf-8").read()
+    open(p, "w", encoding="utf-8").write(t.replace(RULES[0].name, RULES[0].name + " (renamed)", 1))
+
+@rule("II", "the law describes the tool it governs",
+      "the rule names in the law's §XV table are exactly the check's rules, and the operations in its "
+      "plan-language table are exactly the ones the mover accepts", _plant_renamed_rule)
+def r_law_describes_tool(v):
+    law = v.cfg.get("law")
+    if not law or not os.path.isfile(os.path.join(v.root, law)):
+        return ["no law to read"]
+    text, out = v.text(law), []
+    claimed, real = law_rule_names(text), {r.name for r in RULES}
+    for x in sorted(real - claimed):
+        out.append(f"the check has a rule the law's §XV table does not name: {x}")
+    for x in sorted(claimed - real):
+        out.append(f"the law's §XV table names a rule the check does not have: {x}")
+    ops, real_ops = law_plan_ops(text), set(C.ARITY) | {"merge"}
+    for x in sorted(real_ops - ops):
+        out.append(f"the mover accepts an operation the law's plan language does not list: {x}")
+    for x in sorted(ops - real_ops):
+        out.append(f"the law lists an operation the mover does not accept: {x}")
+    return out
+
+def _frontmatter(text):
+    if not text.startswith("---\n"):
+        return {}
+    end = text.find("\n---", 4)
+    fm = {}
+    for line in (text[4:end] if end >= 0 else "").splitlines():
+        if ":" in line and not line.startswith(" "):
+            k, _, val = line.partition(":")
+            fm[k.strip()] = val.strip()
+    return fm
+
+def _plant_goalless_project(v):
+    d = os.path.join(v.root, v.para[1], "Thing")
+    os.makedirs(d); open(os.path.join(d, "Thing — Project.md"), "w").write("---\ngoal: \ndeadline: \n---\n# Thing\n")
+
+@rule("III", "a project is a goal with a deadline",
+      "every folder in the projects category has a project note whose goal and deadline are filled — "
+      "precision required in exactly one place, the definition of a project", _plant_goalless_project)
+def r_projects(v):
+    root, out = os.path.join(v.root, v.para[1]), []
+    if not os.path.isdir(root):
+        return []
+    for d in sorted(os.listdir(root)):
+        if not os.path.isdir(os.path.join(root, d)) or v.is_frozen(f"{v.para[1]}/{d}"):
+            continue
+        notes = [p for p in v.movable if MD(p) and p.startswith(f"{v.para[1]}/{d}/")]
+        fms = [(p, _frontmatter(v.text(p))) for p in notes]
+        proj = [(p, fm) for p, fm in fms if "goal" in fm and "deadline" in fm]
+        if not proj:
+            out.append(f"{v.para[1]}/{d}: no project note (a note with goal and deadline properties)")
+        elif not any(fm["goal"] and fm["deadline"] for _, fm in proj):
+            out.append(f"{proj[0][0]}: goal or deadline is blank")
+    return out
+
+def _plant_stale_exception(v):
+    shutil.rmtree(os.path.join(v.root, "EXTRA"))
+
+@rule("II", "every accepted exception still applies",
+      "the config forgives named things; an exception for something that no longer exists is a false "
+      "claim that silently widens what the check forgives", _plant_stale_exception)
+def r_exceptions(v):
+    a, out = v.accepted, []
+    ex = lambda p: os.path.lexists(os.path.join(v.root, p))
+    dups = a.get("duplicates", [])
+    for i in range(0, len(dups) - 1, 2):
+        x, y = dups[i], dups[i + 1]
+        if not (ex(x) and ex(y)):
+            out.append(f"accepted duplicate pair, one is gone: {x} · {y}")
+        elif v.hash(x) != v.hash(y):
+            out.append(f"accepted duplicate pair no longer identical: {x} · {y}")
+    if len(dups) % 2:
+        out.append(f"accepted duplicates: an odd entry, no pair: {dups[-1]}")
+    targets = set()
+    for p in v.movable:
+        if MD(p):
+            targets |= {m.group(1).split("|")[0].split("#")[0].strip().lower() for m in C.WIKI.finditer(C._strip_code(v.text(p)))}
+    names = {base(p) for p in v.visible if MD(p)} | {os.path.basename(p).lower() for p in v.visible}
+    for t in a.get("broken_links", []):
+        if t.lower() not in targets:
+            out.append(f"accepted broken link no longer linked anywhere: {t}")
+        elif t.lower() in names:
+            out.append(f"accepted broken link now resolves: {t}")
+    for p in a.get("sensitive", []):
+        if not ex(p): out.append(f"accepted sensitive note is gone: {p}")
+    for d in a.get("top_level", []):
+        if not ex(d): out.append(f"accepted top-level folder is gone: {d}")
+    for p in a.get("verbatim", []):
+        if not ex(p): out.append(f"accepted verbatim merge has not been made: {p}")
+        elif "Merged word for word" not in v.text(p)[:400]: out.append(f"accepted verbatim merge is not one: {p}")
+    return out
+
 # ---- the harness ---------------------------------------------------------------
 def _scratch():
     """A minimal vault every rule passes — the control for every fixture."""
@@ -314,7 +483,12 @@ def _scratch():
     v = os.path.join(s, "vault")
     for d in ["# INBOX", "1 PROJECTS", "2 AREAS/META", "3 RESOURCES", "4 ARCHIVE", "FROZEN", ".obsidian"]:
         os.makedirs(os.path.join(v, d))
-    open(os.path.join(v, "2 AREAS/META/LAW.md"), "w").write("# Law\nThis law lives in 2 AREAS/META.\n")
+    rules = " · ".join(r.name for r in RULES)
+    ops = "\n".join(f"| `{o} …` | does | refused |" for o in sorted(set(C.ARITY) | {"merge"}))
+    open(os.path.join(v, "2 AREAS/META/LAW.md"), "w").write(
+        "# Law\nThis law lives in 2 AREAS/META.\n\n## VII. Rite\n\n| Operation | Does | Refused when |\n|---|---|---|\n"
+        + ops + "\n\n## XV. Check\n\n| Law | At the vault | Rules |\n|---|---|---|\n| **All** | rules | " + rules + " |\n")
+    os.makedirs(os.path.join(v, "EXTRA")); open(os.path.join(v, "EXTRA/kept.md"), "w").write("kept\n")
     open(os.path.join(v, "1 PROJECTS/Plan.md"), "w").write("see [[Idea]]\n")
     open(os.path.join(v, "3 RESOURCES/Idea.md"), "w").write("an idea\n")
     open(os.path.join(v, "FROZEN/organ.md"), "w").write("live\n")
@@ -324,7 +498,7 @@ def _scratch():
     pin = os.path.join(s, "organ.py")
     open(pin, "w").write('ROOT = "FROZEN"\nNOTE = "3 RESOURCES/Idea.md"\n')
     cfg = {"law": "2 AREAS/META/LAW.md", "meta_dirs": ["2 AREAS/META"], "registry": "2 AREAS/META/REGISTRY.md",
-           "frozen": [{"root": "FROZEN", "pins": [[pin, '"FROZEN"']]}],
+           "frozen": [{"root": "FROZEN", "pins": [[pin, '"FROZEN"']]}], "accepted": {"top_level": ["EXTRA"]},
            "pointers": [{"file": pin, "path": "3 RESOURCES/Idea.md"}]}
     import registry
     registry.write(v, cfg)

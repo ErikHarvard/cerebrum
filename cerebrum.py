@@ -25,6 +25,7 @@ The frozen register is vault paths other programs depend on; they MUST NOT be mo
 one breaks every program that reads it). Membership is data, from cerebrum.json.
 Set VAULT=<dir> to point any command at a scratch copy instead of the live vault.
 """
+import time, glob
 import argparse, hashlib, json, os, re, subprocess, sys, tarfile, tempfile, shutil
 from collections import defaultdict, Counter
 from datetime import datetime
@@ -526,6 +527,15 @@ def _sep(heading):
 
 FENCE = "`" * 8     # longer than any fence a source may hold, so a source's own code blocks stay inside
 
+def provenance(op, src, sp):
+    """D1 (Law Revision I): every piece carries the name of the note it came from. `compose` opens the
+    new note with this header; `extend` writes it as one line before the pieces. No date — the bytes
+    are derived from the plan alone, so the dry run and the run agree."""
+    where = ", ".join(f"L{a}–L{b}" if a != b else f"L{a}" for a, b in sp)
+    if op == "compose":
+        return f"*Composed verbatim from `{src}`, {where} — the source is kept whole.*\n\n".encode()
+    return f"*Appended verbatim from `{src}`, {where}.*\n\n".encode()
+
 def _merge_bytes(dst, sources, read):
     """The merged note's bytes, and where each source's own bytes sit inside it: {path: (offset, length)}.
     Each source is copied unchanged — byte for byte — so it can always be sliced back out."""
@@ -702,13 +712,13 @@ def simulate(vault, ops, before_rows):
                 if not parent_ok(dst): errors.append(f"line {n}: compose destination folder missing: {dst}"); continue
                 if not dst.endswith(".md"): errors.append(f"line {n}: compose target is not a note: {dst}"); continue
                 if case_clash(dst): errors.append(f"line {n}: compose target differs only by case from an existing name: {dst}"); continue
-                data = piece
+                data = provenance("compose", src, sp) + piece
                 origin[dst] = "(created) " + dst
             else:
                 if dst not in files or not dst.endswith(".md"):
                     errors.append(f"line {n}: extend needs an existing note: {dst}"); continue
                 old_b = content(dst)
-                data = old_b + (b"\n" if old_b.endswith(b"\n") else b"\n\n") + piece
+                data = old_b + (b"\n" if old_b.endswith(b"\n") else b"\n\n") + provenance("extend", src, sp) + piece
             base, off = len(data) - len(piece), 0
             for a, b in sp:
                 ln = len(semantics.take(data_src, [(a, b)]))
@@ -880,7 +890,8 @@ def apply_plan(vault, ops, before_rows, trash_fn, undo_path, frozen_live=False):
                     import semantics
                     with open(J(src), "rb") as fh:
                         data_src = fh.read()
-                    piece = semantics.take(data_src, semantics.spans(spec, semantics.segment(data_src)))
+                    sp = semantics.spans(spec, semantics.segment(data_src))
+                    piece = provenance(op, src, sp) + semantics.take(data_src, sp)
                     if op == "compose":
                         if os.path.lexists(J(dst)):
                             return False, [f"line {n}: stopped — destination appeared: {dst}"], expect
@@ -1046,6 +1057,43 @@ def cmd_undo(a):
         print("   " + n)
     return 1 if notes else 0
 
+def loss_since(vault, manifest_path, frozen=lambda p: False):
+    """Files the manifest listed (sha, size, path per row) whose bytes are gone now — no file in the vault
+    holds that hash any more — outside the frozen register. A moved or renamed file is not a loss."""
+    with open(manifest_path, encoding="utf-8") as fh:
+        rows = [ln.split("\t") for ln in fh.read().splitlines() if ln and not ln.startswith("#")]
+    here = {sha256(os.path.join(vault, p)) for p in rels(vault)}
+    return [r[2] for r in rows if len(r) >= 3 and not frozen(r[2]) and r[0] not in here]
+
+def cmd_pass(_a):
+    """D2 (Law Revision I): "Prepare the pass" as one read-only command — the check, the inbox with each
+    note's age, the three counts, the registry's freshness, and the Acta entry to append. The pass stays
+    the keeper's; this only prepares it."""
+    import checks, registry
+    ok = checks.run(VAULT, CFG)
+    inbox = sorted(p for p in rels(VAULT) if p.startswith(PARA[0] + "/") and p.endswith(".md") and not is_frozen(p))
+    now = time.time()
+    print(f"inbox    : depth {len(inbox)}")
+    for p in inbox:
+        age = int((now - os.path.getmtime(os.path.join(VAULT, p))) // 86400)
+        print(f"   {age:4d} d  {p}")
+    v = checks.Vault(VAULT, CFG)
+    links = [r for r in checks.RULES if r.name == "every link names one note"][0].fn(v)
+    broken, ambiguous = [l for l in links if "names nothing" in l], [l for l in links if "could be" in l]
+    mans = sorted(glob.glob(os.path.join(STATE, "manifest-*.tsv")))
+    loss = loss_since(VAULT, mans[-1], is_frozen) if mans else []
+    stale = CFG.get("registry") and not registry.fresh(VAULT, CFG)
+    print(f"counts   : inbox depth {len(inbox)} · broken links {len(broken)} · ambiguous {len(ambiguous)} · "
+          f"loss {len(loss)}" + (f" (since {os.path.basename(mans[-1])})" if mans else " (no manifest yet)"))
+    for p in loss[:10]:
+        print(f"   lost: {p}")
+    print("registry : " + ("STALE — run: cerebrum.py registry --write" if stale else "fresh"))
+    print("\nActa entry to append:\n")
+    print(f"## {time.strftime('%Y-%m-%d %H:%M')} — Weekly pass\nPrepared by Claude, decided by the keeper.\n"
+          f"- **Check:** {'GREEN' if ok else 'RED'}.\n- **The three counts:** inbox depth **{len(inbox)}** · "
+          f"broken links **{len(broken)}**, **{len(ambiguous)}** ambiguous · loss **{len(loss)}**.\n- **Moves:** none.")
+    return 0
+
 def cmd_check(_a):
     """The vault's build: every rule under the three laws of thought, each proven able to fail."""
     import checks
@@ -1066,6 +1114,7 @@ def main():
     ap = argparse.ArgumentParser(description="Builder tool for the metacursive vault")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check", help="run every rule (the vault's build)")
+    sub.add_parser("pass", help="prepare the weekly pass — read-only: check, inbox, the three counts, the Acta entry")
     g = sub.add_parser("registry", help="generate the registry of notes and meta-notes")
     g.add_argument("--write", action="store_true", help="replace the registry note in the vault")
     sub.add_parser("snapshot")
@@ -1088,7 +1137,7 @@ def main():
         return 2
     return {"snapshot": cmd_snapshot, "manifest": cmd_manifest, "inventory": cmd_inventory,
             "verify": cmd_verify, "selftest": cmd_selftest, "move": cmd_move,
-            "undo": cmd_undo, "check": cmd_check,
+            "undo": cmd_undo, "check": cmd_check, "pass": cmd_pass,
             "registry": cmd_registry}[a.cmd](a)
 
 if __name__ == "__main__":

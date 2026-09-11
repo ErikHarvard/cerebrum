@@ -391,7 +391,9 @@ try:
     check("apply → GREEN; the composed notes are the planned new files", ok)
     if not ok: print("     ", f[:4])
     ag = open(os.path.join(v, "notes", "Alpha and Gamma.md"), "rb").read()
-    check("a composed note is its parts, verbatim, in the planned order", ag == parts[3]["bytes"] + parts[1]["bytes"])
+    check("a composed note is its parts, verbatim, in the planned order — after a header naming the source (D1)",
+          ag.endswith(parts[3]["bytes"] + parts[1]["bytes"]) and ag.startswith(b"*Composed verbatim from `notes/dump.md`, ")
+          and b"L" in ag[:120] and ag == C.provenance("compose", "notes/dump.md", SEM.spans("P003,P001", SEM.segment(open(os.path.join(v, "notes", "dump.md"), "rb").read()))) + parts[3]["bytes"] + parts[1]["bytes"])
     check("the source is untouched", C.sha256(os.path.join(v, "notes", "dump.md")) == sha)
     def errs_for(lines):
         return C.simulate(v, write_plan(os.path.join(tmp7, "q.tsv"), lines), manifest(v))[0]
@@ -418,10 +420,14 @@ try:
     check("apply → GREEN (an extended note's new bytes are the planned ones)", ok)
     if not ok: print("     ", f[:4])
     lines = note.splitlines(keepends=True)
-    check("extend keeps the old note as it was and appends the lines verbatim",
-          open(os.path.join(v, "notes", "b.md"), "rb").read() == b_before + b"\n" + b"".join(lines[1:6]))
+    b_now = open(os.path.join(v, "notes", "b.md"), "rb").read()
+    check("extend keeps the old note as it was and appends the lines verbatim, after one line naming their source (D1)",
+          b_now == b_before + b"\n" + C.provenance("extend", "notes/dump.md", [(2, 6)]) + b"".join(lines[1:6])
+          and C.provenance("extend", "notes/dump.md", [(2, 6)]).startswith("*Appended verbatim from `notes/dump.md`, L2\u2013L6.*".encode()))
+    rest = open(os.path.join(v, "notes", "Rest.md"), "rb").read()
     check("a composed note from line ranges holds them in the planned order",
-          open(os.path.join(v, "notes", "Rest.md"), "rb").read() == b"".join(lines[6:10]) + lines[0])
+          rest == C.provenance("compose", "notes/dump.md", [(7, 10), (1, 1)]) + b"".join(lines[6:10]) + lines[0]
+          and rest.startswith("*Composed verbatim from `notes/dump.md`, L7\u2013L10, L1 \u2014".encode()))
     check("undo cuts the extended note back exactly and removes the composed one",
           C.undo_plan(v, undo8) == [] and open(os.path.join(v, "notes", "b.md"), "rb").read() == b_before
           and C._verify(v, bm)[0])
@@ -651,7 +657,8 @@ try:
           and rd("4 ARCHIVE/Two — original (2026-01-01).md") == orig["# INBOX/Two.md"])
     check("its pieces land verbatim: gathered into existing notes, composed into new ones",
           rd("3 RESOURCES/Songs.md").endswith(b"".join(mixed[0:3])) and rd("3 RESOURCES/Training.md").endswith(b"".join(mixed[3:]))
-          and rd("3 RESOURCES/Alpha.md") == b"".join(two[0:3]) and rd("2 AREAS/Beta.md") == b"".join(two[3:]))
+          and rd("3 RESOURCES/Alpha.md").endswith(b"".join(two[0:3])) and rd("2 AREAS/Beta.md").endswith(b"".join(two[3:]))
+          and rd("3 RESOURCES/Alpha.md").startswith(b"*Composed verbatim from `4 ARCHIVE/Two"))
     check("dedupe: one copy of the repeated line stays; the original, all three copies, is archived",
           rd("2 AREAS/Aph.md").decode().count("pleasure of rejection") == 1
           and rd("4 ARCHIVE/Aph — before dedupe (2026-01-01).md") == orig["2 AREAS/Aph.md"])
@@ -868,6 +875,38 @@ ws = SEM.windows(dense + " " + "x" * 4000)
 check("every window fits the budget, even a 4,000-character token", all(len(w) <= SEM.WINDOW_CHARS for w in ws))
 check("rejoined, the windows are every word of the text", "".join(" ".join(ws).split()) == "".join((dense + " " + "x" * 4000).split()))
 check("300 words of links make several windows, not one", len(SEM.windows(dense)) > 1)
+
+print("== Law Revision I: six new rules, each red on its planted defect and green on the control ==")
+import checks as CK
+bad = CK.selftest()
+for name in ["one inbox, one archive", "three levels, no deeper", "no empty folder", "the law describes the tool it governs",
+             "a project is a goal with a deadline", "every accepted exception still applies"]:
+    check(f"rule '{name}' exists and proves itself", any(r.name == name for r in CK.RULES) and not any(b.startswith(name) for b in bad))
+check("the selftest is clean for every rule", bad == [])
+check("the law's two tables are read where they are written: the scratch law names every rule and every op",
+      (lambda s: (CK.law_rule_names(open(os.path.join(s[1], s[2]["law"])).read()) == {r.name for r in CK.RULES}
+                  and CK.law_plan_ops(open(os.path.join(s[1], s[2]["law"])).read()) == set(C.ARITY) | {"merge"}))(CK._scratch()))
+
+print("== pass (D2): loss is counted from the manifest's own rows — zero unchanged, one per file gone ==")
+tmp15 = tempfile.mkdtemp(prefix="cerebrum-pass-")
+try:
+    v = os.path.join(tmp15, "vault"); os.makedirs(os.path.join(v, "3 RESOURCES")); os.makedirs(os.path.join(v, "FROZEN"))
+    open(os.path.join(v, "3 RESOURCES", "a.md"), "w").write("a\n"); open(os.path.join(v, "FROZEN", "f.md"), "w").write("f\n")
+    mp = os.path.join(tmp15, "manifest.tsv")
+    with open(mp, "w", encoding="utf-8") as fh:
+        fh.write("# a comment\n")
+        for p in sorted(C.rels(v)):
+            fh.write(f"{C.sha256(os.path.join(v, p))}\t{os.path.getsize(os.path.join(v, p))}\t{p}\n")
+    frozen = lambda p: p.startswith("FROZEN/")
+    check("an unchanged vault has loss 0", C.loss_since(v, mp, frozen) == [])
+    os.rename(os.path.join(v, "3 RESOURCES", "a.md"), os.path.join(v, "3 RESOURCES", "renamed.md"))
+    check("a moved or renamed file is not a loss — its bytes are still in the vault", C.loss_since(v, mp, frozen) == [])
+    os.remove(os.path.join(v, "3 RESOURCES", "renamed.md"))
+    check("a removed movable file is one loss, named", C.loss_since(v, mp, frozen) == ["3 RESOURCES/a.md"])
+    os.remove(os.path.join(v, "FROZEN", "f.md"))
+    check("a file gone inside the frozen register is not the pass's loss", C.loss_since(v, mp, frozen) == ["3 RESOURCES/a.md"])
+finally:
+    shutil.rmtree(tmp15, ignore_errors=True)
 
 print("== registry: a live note inside its archived original is not proposed for removal ==")
 s, root, cfg = K._scratch()
