@@ -29,6 +29,19 @@ def log(msg):
     with open(LOG, "a", encoding="utf-8") as fh:
         fh.write(f"{datetime.now().isoformat(timespec='seconds')}\t{msg}\n")
 
+# ---- the ledger: every input, where it went and why; every retrieval, what went out and why ---------
+LEDGER_DIR = os.path.join(C.STATE, "ledger")
+
+def ledger(kind, **rec):
+    """One JSON line per event in state/ledger/<kind>.jsonl — intake (capture · place · ratify · undo) and
+    retrieval (ask). Rendered into the vault by `cerebrum.py registry` as ARCHIVUM CEREBRI, so the vault
+    can say what came in, where it went and why, and what went out as a copy and why, without the Builder."""
+    os.makedirs(LEDGER_DIR, exist_ok=True)
+    rec = {"when": datetime.now().isoformat(timespec="seconds"), **rec}
+    with open(os.path.join(LEDGER_DIR, f"{kind}.jsonl"), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+    return rec
+
 # ---- the model ----------------------------------------------------------------------------------
 def llm(messages, temperature=0.2, max_tokens=700, seed=None, url=None):
     body = {"model": MODEL, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
@@ -115,6 +128,7 @@ def capture(vault, cfg, title, text, source="", do_polish=False, url=None):
     with open(os.path.join(vault, rel), "xb") as fh:
         fh.write((head + body).encode("utf-8"))
     log(f"capture\t{rel}")
+    ledger("intake", event="capture", note=rel, title=title, source=source, polished=polished, chars=len(text))
     return rel
 
 def polish_note(vault, cfg, rel, url=None):
@@ -283,6 +297,10 @@ def place_note(vault, cfg, note, url=None, say=lambda *_: None):
             fh.write(f"# the Archivist's intake plan for {note} — proposed, NOT ratified\n" + "".join(l + "\n" for l in r["plan"]))
         r["plan_path"] = p
     log(f"place\t{note}\t{r['status']}\t" + (r.get("why", "") or ", ".join(r.get("must_read", [])))[:200])
+    ledger("intake", event="place", note=note, status=r["status"], plan=r.get("plan_path", ""),
+           shortlist=[(x["note"], x["sim"]) for x in sl.get("notes", [])[:5]],
+           readers={w: [{"lines": x["lines"], "op": x["op"], "dest": x.get("dest", ""), "at": x.get("at", ""), "why": x.get("why", "")} for x in r["readers"][w] if x["note"] == note] for w in ("A", "B")},
+           plan_lines=r.get("plan", []))
     return r
 
 # ---- ratify: the keeper's word → the mover under every gate ----------------------------------------
@@ -316,6 +334,8 @@ def ratify(vault, cfg, plan_path, frozen_live=True):
     acta_entry(vault, cfg, plan_path, undo)
     rc, out = run("cerebrum.py", "registry", "--write"); steps.append(("registry", out.splitlines()[-1] if out else ""))
     log(f"ratify\t{plan_path}\tGREEN\t{undo}")
+    ledger("intake", event="ratify", plan=plan_path, by="the keeper, on the page", undo=undo, expect=expect, verify="GREEN",
+           ops=[l.split("\t")[1:] for l in open(undo, encoding="utf-8").read().splitlines() if l.split("\t")[1:2] not in (["plan-begin"], ["plan-end"], ["trashed-to"])])
     return {"ok": True, "steps": steps, "undo": undo}
 
 def acta_entry(vault, cfg, plan_path, undo):
@@ -371,6 +391,9 @@ def ask(vault, cfg, question, url=None, cache_path=None):
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(md)
     log(f"ask\t{question[:80]}\t{len(hits)} passages\t{path}")
+    ledger("retrieval", event="ask", question=question, answer=path, model=MODEL, url=url or LLM_URL,
+           passages=[{"note": h["note"], "pid": h["pid"], "lines": f"L{h['start']}-L{h['end']}", "heading": h["heading"], "sim": h["sim"]} for h in hits],
+           why="the passages nearest the question by meaning, mean-centred, bounded by the model's window; copied out as a Markdown file, the vault untouched")
     return {"markdown": md, "path": path, "sources": [{k: v for k, v in h.items() if k != "text"} for h in hits]}
 
 # ---- titles judged by a reader: is the title the fixed point of the whole? --------------------------
