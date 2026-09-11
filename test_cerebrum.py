@@ -715,6 +715,31 @@ try:
 finally:
     shutil.rmtree(tmp10, ignore_errors=True)
 
+print("== a reader's slice: its units, every line once, nothing outside ==")
+tmp11 = tempfile.mkdtemp(prefix="cerebrum-slice-")
+try:
+    v, ocfg = organ_vault(tmp11)
+    units = [("# INBOX/Mixed.md", "L1-L3"), ("3 RESOURCES/Songs.md", "*")]
+    sp = lambda recs: SEM.slice_problems(v, ocfg, recs, units)
+    good = [rec(v, "# INBOX/Mixed.md", "L1-L3"), rec(v, "3 RESOURCES/Songs.md")]
+    check("a slice whose units are each placed once is clean", sp(good) == [])
+    check("slice red: a line of the unit left out", any("not read" in p for p in sp(
+        [rec(v, "# INBOX/Mixed.md", "L1-L2"), rec(v, "3 RESOURCES/Songs.md")])))
+    check("slice red: a record reaching past the unit", any("outside this slice" in p for p in sp(
+        [rec(v, "# INBOX/Mixed.md", "L1-L5"), rec(v, "3 RESOURCES/Songs.md")])))
+    check("slice red: '*' where the slice holds only part of the note", any("only part of the note" in p for p in sp(
+        [rec(v, "# INBOX/Mixed.md"), rec(v, "3 RESOURCES/Songs.md")])))
+    check("slice red: a note that is not in the slice", any("not in this slice" in p for p in sp(good + [rec(v, "# INBOX/Two.md")])))
+finally:
+    shutil.rmtree(tmp11, ignore_errors=True)
+
+print("== embedding windows: a character budget, never a word count; no word lost ==")
+dense = " ".join(f"https://example.com/video/BV{i:08d}?spm_id_from=333.337.search-card.all.click" for i in range(300))
+ws = SEM.windows(dense + " " + "x" * 4000)
+check("every window fits the budget, even a 4,000-character token", all(len(w) <= SEM.WINDOW_CHARS for w in ws))
+check("rejoined, the windows are every word of the text", "".join(" ".join(ws).split()) == "".join((dense + " " + "x" * 4000).split()))
+check("300 words of links make several windows, not one", len(SEM.windows(dense)) > 1)
+
 print("== registry: a live note inside its archived original is not proposed for removal ==")
 s, root, cfg = K._scratch()
 try:

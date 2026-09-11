@@ -121,7 +121,7 @@ def cmd_segment(rel):
 import json, urllib.request
 from collections import defaultdict, Counter
 
-WINDOW, MIN_WORDS = 300, 30        # words per embedding window · below MIN_WORDS a section is read, not ranked
+MIN_WORDS = 30            # below this a section is read, not ranked
 
 def organ_cfg(cfg):
     return cfg.get("organ", {})
@@ -216,22 +216,39 @@ def sections_of(data, rel):
                     "heading": p["heading"][:80], "text": text})
     return out
 
+WINDOW_CHARS = 1500      # measured 2026-09-11: 300 words of links came to 6,000 characters and overflowed the model
+
+def windows(text, size=WINDOW_CHARS):
+    """Cut on whitespace into pieces of at most `size` characters. Dense text — links, code, other
+    scripts — makes more tokens per word, so the budget is characters, not words; a single token
+    longer than the budget is cut too. Rejoined with spaces, the pieces are the text's words, all."""
+    out, cur = [], ""
+    for w in text.split():
+        while len(w) > size:
+            if cur:
+                out.append(cur); cur = ""
+            out.append(w[:size]); w = w[size:]
+        if cur and len(cur) + 1 + len(w) > size:
+            out.append(cur); cur = w
+        else:
+            cur = f"{cur} {w}" if cur else w
+    return out + [cur] if cur or not out else out
+
 def section_vectors(secs, cfg, embed, cache_path=None):
-    """One unit vector per section — the mean of its windows' embeddings — cached by model and
-    section hash, so an unchanged section is never embedded twice."""
+    """One unit vector per section — the mean of its windows' embeddings — cached by model, window
+    size and section hash, so an unchanged section is never embedded twice."""
     import numpy as np
     model = "fake" if embed is fake_embed else organ_cfg(cfg).get("embed_model", "nomic-embed-text")
     cache = {}
     if cache_path and os.path.exists(cache_path):
         with open(cache_path, encoding="utf-8") as fh:
             cache = json.load(fh)
-    key = lambda s: f"{model}:{hashlib.sha256(s['text'].encode()).hexdigest()}"
+    key = lambda s: f"{model}:{WINDOW_CHARS}:{hashlib.sha256(s['text'].encode()).hexdigest()}"
     todo = list({key(s): s for s in secs if key(s) not in cache}.items())
     wins, owner = [], []
     for n, (_k, s) in enumerate(todo):
-        w = s["text"].split()
-        for i in range(0, max(len(w), 1), WINDOW):
-            wins.append("clustering: " + " ".join(w[i:i + WINDOW])); owner.append(n)
+        for piece in windows(s["text"]):
+            wins.append("clustering: " + piece); owner.append(n)
     if wins:
         vecs, acc = embed(wins, cfg), defaultdict(list)
         for n, v in zip(owner, vecs):
@@ -721,12 +738,65 @@ USAGE = """semantics.py — the semantic organ
   parts    "<note>"          print the note's sha and parts (what a reader cites)
   index                      triage: sections + local embeddings → state/sema/index-<ts>.{json,md}
   reading  <A>               coverage of one reading (a .jsonl file, or a folder of them)
+  reading  <file> --slice <slices.json> <id>   coverage of one reader's slice: its units, every line once
   propose  <A> <B>           coverage of both → agreement → plan + proposal in state/sema/ → dry run
   converge <expect.json> <A> <B>   after a plan ran: its notes, read again, must need nothing more
 """
 
+def slice_problems(vault, cfg, recs, units):
+    """One reader's slice: each unit is a whole note ("*") or a line range of one. Every line of every
+    unit is placed exactly once, by records pinned to the note as it is now — and nothing outside."""
+    probs, want, got, stars = [], {}, defaultdict(Counter), Counter()
+    for note, spec in units:
+        data = read_bytes(vault, note)
+        lines = set(range(1, len(data.splitlines(keepends=True)) + 1)) if spec == "*" else \
+            {l for a, b in spans(spec, segment(data)) for l in range(a, b + 1)}
+        want[note] = want.get(note, set()) | lines
+    for r in recs:
+        at, note = r.get("_at", "a record"), r.get("note")
+        if "_bad" in r:
+            probs.append(f"{at}: not JSON: {r['_bad']}"); continue
+        if note not in want:
+            probs.append(f"{at}: not in this slice: {note!r}"); continue
+        data = read_bytes(vault, note)
+        n, bad = len(data.splitlines(keepends=True)), validate(r, hashlib.sha256(data).hexdigest(), cfg)
+        probs += [f"{at}: {note}: {b}" for b in bad]
+        spec = str(r.get("lines", "*")).strip() or "*"
+        if spec == "*":
+            if len(want[note]) != n:
+                probs.append(f"{at}: {note}: '*' in a slice holding only part of the note — name the lines")
+            stars[note] += 1; continue
+        try:
+            ls = [l for a, b in spans(spec, segment(data)) for l in range(a, b + 1)]
+        except (KeyError, ValueError) as e:
+            probs.append(f"{at}: {note}: no such part or line: {e}"); continue
+        out = [l for l in ls if l not in want[note]]
+        if out:
+            probs.append(f"{at}: {note}: L{out[0]} is outside this slice"); continue
+        got[note].update(ls)
+    for note, lines in want.items():
+        twice = sorted(l for l, c in got[note].items() if c > 1)
+        missing = sorted(lines - set(got[note]))
+        if twice:
+            probs.append(f"{note}: L{twice[0]} placed twice")
+        if stars[note] > 1:
+            probs.append(f"{note}: {stars[note]} '*' records — at most one")
+        if missing and not stars[note]:
+            probs.append(f"{note}: {len(missing)} line(s) not read — the first is L{missing[0]}")
+    return probs
+
 def main(argv):
     V, cfg = C.VAULT, C.CFG
+    if argv[:1] == ["reading"] and len(argv) == 5 and argv[2] == "--slice":
+        with open(os.path.expanduser(argv[3]), encoding="utf-8") as fh:
+            sl = next((s for s in json.load(fh) if s["id"] == argv[4]), None)
+        if sl is None:
+            print(f"reading  : no slice {argv[4]!r} in {argv[3]}"); return 2
+        probs = slice_problems(V, cfg, load_reading(argv[1]), [tuple(u) for u in sl["units"]])
+        print(f"reading  : slice {argv[4]} — {len(sl['units'])} unit(s) · {len(probs)} problem(s)")
+        for p in probs[:40]:
+            print("   " + p)
+        return 0 if not probs else 1
     if argv[:1] == ["segment"] and len(argv) == 2:
         return cmd_segment(argv[1])
     if argv[:1] == ["parts"] and len(argv) == 2:
