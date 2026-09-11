@@ -363,6 +363,74 @@ try:
 finally:
     shutil.rmtree(tmp6, ignore_errors=True)
 
+print("== semantics: a note cut into parts loses nothing; compose places each part once, verbatim ==")
+import semantics as SEM
+note = (b"Intro line, no heading\n"
+        b"# Alpha\nalpha text\n```\n# not a heading inside a fence\n```\n"
+        b"## Beta\nbeta text\n"
+        b"# Gamma\ngamma text\n")
+parts = SEM.segment(note)
+check("the parts rejoin to the note, byte for byte", b"".join(p["bytes"] for p in parts) == note)
+check("a '#' line inside a code fence is not a cut", [p["heading"] for p in parts] == ["", "Alpha", "Beta", "Gamma"])
+check("ranges read as parts, order kept", SEM.parse_ids("P001-P003,P000") == ["P001", "P002", "P003", "P000"])
+tmp7 = tempfile.mkdtemp(prefix="cerebrum-compose-")
+try:
+    v = build(tmp7)
+    open(os.path.join(v, "notes", "dump.md"), "wb").write(note)
+    before = manifest(v)
+    sha = C.sha256(os.path.join(v, "notes", "dump.md"))
+    ops = write_plan(os.path.join(tmp7, "p.tsv"), [
+        "partition\tnotes/dump.md\t" + sha,
+        "compose\tnotes/Alpha and Gamma.md\tnotes/dump.md\tP003,P001",
+        "compose\tnotes/Beta.md\tnotes/dump.md\tP002",
+        "leave\tnotes/dump.md\tP000"])
+    errs, exp, _ = C.simulate(v, ops, before)
+    check("a complete partition passes the dry run", errs == [])
+    undo7 = os.path.join(tmp7, "u.tsv")
+    ok, f, _ = C.apply_plan(v, ops, before, C._scratch_trash_fn(os.path.join(tmp7, "_t")), undo7)
+    check("apply → GREEN; the composed notes are the planned new files", ok)
+    if not ok: print("     ", f[:4])
+    ag = open(os.path.join(v, "notes", "Alpha and Gamma.md"), "rb").read()
+    check("a composed note is its parts, verbatim, in the planned order", ag == parts[3]["bytes"] + parts[1]["bytes"])
+    check("the source is untouched", C.sha256(os.path.join(v, "notes", "dump.md")) == sha)
+    def errs_for(lines):
+        return C.simulate(v, write_plan(os.path.join(tmp7, "q.tsv"), lines), manifest(v))[0]
+    check("a part with no place is refused (excluded middle)",
+          errs_for(["partition\tnotes/dump.md\t" + sha, "compose\tnotes/X.md\tnotes/dump.md\tP001-P003"]) != [])
+    check("a part placed twice is refused (non-contradiction)",
+          errs_for(["partition\tnotes/dump.md\t" + sha, "compose\tnotes/X.md\tnotes/dump.md\tP000-P003",
+                    "compose\tnotes/Y.md\tnotes/dump.md\tP002"]) != [])
+    check("a source changed since it was segmented is refused",
+          errs_for(["partition\tnotes/dump.md\t" + "0" * 64, "compose\tnotes/X.md\tnotes/dump.md\tP000-P003"]) != [])
+    check("an unknown part is refused", errs_for(["compose\tnotes/X.md\tnotes/dump.md\tP009"]) != [])
+    check("composing onto an existing note is refused", errs_for(["compose\tnotes/a.md\tnotes/dump.md\tP001"]) != [])
+    check("undo removes exactly the composed notes; the vault equals its before-manifest",
+          C.undo_plan(v, undo7) == [] and C._verify(v, before)[0])
+    bm = manifest(v)
+    ops = write_plan(os.path.join(tmp7, "p2.tsv"), [
+        "partition\tnotes/dump.md\t" + sha,
+        "extend\tnotes/b.md\tnotes/dump.md\tL2-L6",
+        "compose\tnotes/Rest.md\tnotes/dump.md\tL7-L10,L1"])
+    check("line ranges and extend: a complete partition by lines passes the dry run", C.simulate(v, ops, bm)[0] == [])
+    b_before = open(os.path.join(v, "notes", "b.md"), "rb").read()
+    undo8 = os.path.join(tmp7, "u2.tsv")
+    ok, f, _ = C.apply_plan(v, ops, bm, C._scratch_trash_fn(os.path.join(tmp7, "_t2")), undo8)
+    check("apply → GREEN (an extended note's new bytes are the planned ones)", ok)
+    if not ok: print("     ", f[:4])
+    lines = note.splitlines(keepends=True)
+    check("extend keeps the old note as it was and appends the lines verbatim",
+          open(os.path.join(v, "notes", "b.md"), "rb").read() == b_before + b"\n" + b"".join(lines[1:6]))
+    check("a composed note from line ranges holds them in the planned order",
+          open(os.path.join(v, "notes", "Rest.md"), "rb").read() == b"".join(lines[6:10]) + lines[0])
+    check("undo cuts the extended note back exactly and removes the composed one",
+          C.undo_plan(v, undo8) == [] and open(os.path.join(v, "notes", "b.md"), "rb").read() == b_before
+          and C._verify(v, bm)[0])
+    check("a line placed nowhere is refused",
+          C.simulate(v, write_plan(os.path.join(tmp7, "p3.tsv"), [
+              "partition\tnotes/dump.md\t" + sha, "compose\tnotes/Rest.md\tnotes/dump.md\tL2-L10"]), manifest(v))[0] != [])
+finally:
+    shutil.rmtree(tmp7, ignore_errors=True)
+
 print("== checks.py: every rule proves it can fail; the harness catches vacuous and crashing rules ==")
 import checks as K
 quiet = lambda *a, **k: None

@@ -55,6 +55,23 @@ Close Obsidian before moving files; the mover refuses while it is open.
 | `append <dst.md> <src> <heading>` | appends a note to another under a heading |
 | `trash <file>` | to the desktop trash, only while an identical copy survives the plan |
 | `rmdir <dir>` | removes a folder only if it is already empty |
+| `compose <new.md> <src.md> <spec>` | a new note made of those pieces of a note, verbatim, in the order given |
+| `extend <note.md> <src.md> <spec>` | appends those pieces to an existing note, whose old text stays exactly as it was |
+| `leave <src.md> <spec>` | pieces deliberately left only in the source |
+| `partition <src.md> <sha256>` | declares the source is distributed completely: it must still be the note that was cut, and every one of its lines must be composed, extended or left exactly once |
+
+A `<spec>` lists pieces in order: a part (`P012`), a run of parts (`P011-P022`) or a line range (`L1542-L1600`).
+
+## Organizing by meaning
+
+Moving whole notes organizes where they sit; `semantics.py` organizes what they say.
+
+1. `python3 semantics.py segment "<note>"` cuts a note into parts at its headings — never inside a code block — and writes a table of them. Rejoined, the parts are the note, byte for byte.
+2. A reader — you, or an AI assistant you ask — reads the parts and writes a plan: what each piece is about, where it belongs, and in what order. Pieces too large to be one topic can be cut at any line.
+3. The dry run checks the form: every line lands in exactly one place or is explicitly left (excluded middle), unchanged (identity), and never twice (non-contradiction). A plan for a note that has changed since it was cut is refused.
+4. `rehearse.py` proves the plan on a copy; then it runs, and the vault is verified against it.
+
+What no tool can check is whether a piece was placed *well* — that is meaning, and it stays with the reader who proposed the plan and the person who approves it.
 
 ## Tests
 

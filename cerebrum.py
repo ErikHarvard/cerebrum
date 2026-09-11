@@ -488,7 +488,15 @@ def cmd_selftest(_a):
 #   merge  <new.md> <src> [<src> …]   a new note holding each source word for word, under a
 #                                     heading naming it; prefix a source with code: to fence it.
 #                                     Sources are kept, and may be frozen (read, never written).
-ARITY = {"mkdir": 1, "rmdir": 1, "trash": 1, "mv": 2, "append": 3}
+#   compose <new.md> <src.md> <spec>  a new note made of those pieces of src, verbatim, in that order
+#   extend  <note.md> <src.md> <spec> those pieces appended to an existing note, which stays as it was
+#   leave   <src.md> <spec>           pieces deliberately left only in src, placed nowhere else
+#   partition <src.md> <sha256>       src is distributed completely: its bytes must still hash to
+#                                     sha256, and every line is composed, extended or left exactly once
+#   <spec>: comma-separated parts (P012), runs of parts (P011-P022) or line ranges (L1542-L1600),
+#   from `semantics.py segment`, in the order they are to appear.
+ARITY = {"mkdir": 1, "rmdir": 1, "trash": 1, "mv": 2, "append": 3,
+         "compose": 3, "extend": 3, "leave": 2, "partition": 2}
 
 def load_plan(path):
     ops = []
@@ -548,6 +556,7 @@ def simulate(vault, ops, before_rows):
     dirs = _dirs(vault)
     buf = {}                                                       # current path -> simulated bytes
     removed, contained = [], {}
+    placed, pinned = defaultdict(list), {}                         # src -> line numbers placed; src -> line count
 
     def exists(p): return p in files or p in dirs
     def parent_ok(p): return os.path.dirname(p) == "" or os.path.dirname(p) in dirs
@@ -573,7 +582,7 @@ def simulate(vault, ops, before_rows):
             dirs.discard(q); dirs.add(d + q[len(s):])
 
     for n, op, args in ops:
-        paths = args[:2] if op in ("mv", "append") else args[:1]
+        paths = args[:2] if op in ("mv", "append") else [] if op in ("leave", "partition") else args[:1]
         if any(is_frozen(p) for p in paths):
             errors.append(f"line {n}: touches the frozen register: {paths}"); continue
         if op == "mkdir":
@@ -625,6 +634,60 @@ def simulate(vault, ops, before_rows):
             files[dst] = hashlib.sha256(data).hexdigest()
             origin[dst] = "(created) " + dst
             contained.update({origin[p]: [dst, off, ln] for p, (off, ln) in where.items()})
+        elif op in ("compose", "extend", "leave", "partition"):
+            import semantics
+            src = args[1] if op in ("compose", "extend") else args[0]
+            if src not in files:
+                errors.append(f"line {n}: {op} source missing: {src}"); continue
+            data_src = content(src)
+            n_lines = len(data_src.splitlines(keepends=True))
+            if op == "partition":
+                if hashlib.sha256(data_src).hexdigest() != args[1]:
+                    errors.append(f"line {n}: {src} changed since it was segmented — segment it again and re-plan"); continue
+                pinned[origin[src]] = n_lines
+                continue
+            try:
+                sp = semantics.spans(args[2] if op in ("compose", "extend") else args[1], semantics.segment(data_src))
+            except (KeyError, ValueError) as e:
+                errors.append(f"line {n}: {src}: no such part or line: {e}"); continue
+            bad = [(a, b) for a, b in sp if not 1 <= a <= b <= n_lines]
+            if bad:
+                errors.append(f"line {n}: line range(s) outside {src} (1–{n_lines}): {bad}"); continue
+            covered = [ln for a, b in sp for ln in range(a, b + 1)]
+            if op == "leave":
+                placed[origin[src]] += covered
+                continue
+            dst, piece = args[0], semantics.take(data_src, sp)
+            if op == "compose":
+                if exists(dst): errors.append(f"line {n}: compose would clobber: {dst}"); continue
+                if not parent_ok(dst): errors.append(f"line {n}: compose destination folder missing: {dst}"); continue
+                if not dst.endswith(".md"): errors.append(f"line {n}: compose target is not a note: {dst}"); continue
+                if case_clash(dst): errors.append(f"line {n}: compose target differs only by case from an existing name: {dst}"); continue
+                data = piece
+                origin[dst] = "(created) " + dst
+            else:
+                if dst not in files or not dst.endswith(".md"):
+                    errors.append(f"line {n}: extend needs an existing note: {dst}"); continue
+                old_b = content(dst)
+                data = old_b + (b"\n" if old_b.endswith(b"\n") else b"\n\n") + piece
+            base, off = len(data) - len(piece), 0
+            for a, b in sp:
+                ln = len(semantics.take(data_src, [(a, b)]))
+                contained[f"{origin[src]}#L{a}-L{b}"] = [dst, base + off, ln]
+                off += ln
+            buf[dst] = data
+            files[dst] = hashlib.sha256(data).hexdigest()
+            placed[origin[src]] += covered
+
+    # a declared partition: every line of the source placed exactly once — composed, extended or left
+    for src, n_lines in pinned.items():
+        used = Counter(placed[src])
+        missing = [ln for ln in range(1, n_lines + 1) if not used[ln]]
+        twice = sorted(ln for ln, c in used.items() if c > 1)
+        if missing:
+            errors.append(f"partition of {src}: {len(missing)} line(s) have no place — the first is L{missing[0]}")
+        if twice:
+            errors.append(f"partition of {src}: {len(twice)} line(s) placed more than once — the first is L{twice[0]}")
 
     # a trashed file is lossless only if an identical copy survives the WHOLE plan
     surviving = set(files.values())
@@ -744,6 +807,33 @@ def apply_plan(vault, ops, before_rows, trash_fn, undo_path, frozen_live=False):
                     with open(J(dst), "xb") as fh:
                         fh.write(data); fh.flush(); os.fsync(fh.fileno())
                     ok = sha256(J(dst)) == made
+                elif op in ("compose", "extend"):
+                    dst, src, spec = args
+                    import semantics
+                    with open(J(src), "rb") as fh:
+                        data_src = fh.read()
+                    piece = semantics.take(data_src, semantics.spans(spec, semantics.segment(data_src)))
+                    if op == "compose":
+                        if os.path.lexists(J(dst)):
+                            return False, [f"line {n}: stopped — destination appeared: {dst}"], expect
+                        made = hashlib.sha256(piece).hexdigest()
+                        _log(log, "compose", dst, made)
+                        with open(J(dst), "xb") as fh:
+                            fh.write(piece); fh.flush(); os.fsync(fh.fileno())
+                        ok = sha256(J(dst)) == made
+                    else:
+                        with open(J(dst), "rb") as fh:
+                            old_b = fh.read()
+                        new = old_b + (b"\n" if old_b.endswith(b"\n") else b"\n\n") + piece
+                        _log(log, "extend", dst, src, len(old_b), hashlib.sha256(old_b).hexdigest())
+                        tmp = J(dst) + ".cerebrum-tmp"
+                        with open(tmp, "wb") as fh:
+                            fh.write(new); fh.flush(); os.fsync(fh.fileno())
+                        shutil.copymode(J(dst), tmp)
+                        os.replace(tmp, J(dst))
+                        ok = sha256(J(dst)) == hashlib.sha256(new).hexdigest()
+                elif op in ("leave", "partition"):
+                    ok = True                                  # declarations, checked in the dry run
             except Exception as e:
                 return False, [f"line {n}: {op} failed: {e}"], expect
             if not ok:
@@ -777,7 +867,7 @@ def undo_plan(vault, undo_path):
             s, d = args
             if os.path.lexists(J(d)) and not os.path.lexists(J(s)):
                 os.rename(J(d), J(s))
-        elif op == "append":
+        elif op in ("append", "extend"):
             d, _s, n_old, sha_old = args
             with open(J(d), "rb") as fh: data = fh.read()
             if hashlib.sha256(data).hexdigest() != sha_old:
@@ -786,7 +876,7 @@ def undo_plan(vault, undo_path):
                     notes.append(f"could not un-merge {d} — it no longer starts with its original bytes; restore it from the snapshot")
                     continue
                 with open(J(d), "wb") as fh: fh.write(cut)
-        elif op == "merge":
+        elif op in ("merge", "compose"):
             dst, made = args[0], args[1]
             if os.path.lexists(J(dst)):
                 if sha256(J(dst)) == made:
