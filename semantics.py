@@ -352,6 +352,208 @@ def index_ok(ix):
     """The index is believed only if every copy group found itself and the model probe passed."""
     return all(c["found"] is not False for c in ix["control"]) and (ix["probe"] is None or ix["probe"]["ok"])
 
+# ---- placement: where a new piece of text belongs, by meaning ---------------------------------
+# Measured 2026-09-11 on this vault (25 sections lifted from their notes, own note excluded): the
+# embedding put a section back in its own FOLDER 11/25 times raw, 13/25 mean-centred. So the
+# embedding is a SHORTLIST for a reader, never a verdict — the organ run forward: shortlist, two
+# readers, agreement, the keeper. Centring (subtracting the corpus mean) is kept: it widens the gap
+# between the lead and the median from 0.12 to 0.42 with no loss, so the shortlist is at least sharp.
+def _targets(cfg, notes):
+    """Where a new text may be placed: never the archive, never the system's own notes."""
+    arch = list(cfg.get("para", C.PARA))[-1]
+    meta = tuple(d + "/" for d in cfg.get("meta_dirs", []))
+    return [n for n in notes if not n.startswith(arch + "/") and not n.startswith(meta)]
+
+def _corpus(vault, cfg, embed, cache_path, exclude=()):
+    import numpy as np
+    notes = [n for n in _targets(cfg, scope(vault, cfg)) if n not in set(exclude)]
+    secs = []
+    for rel in notes:
+        secs += [x for x in sections_of(read_bytes(vault, rel), rel) if x["words"] >= MIN_WORDS]
+    if not secs:
+        return notes, secs, None, None
+    M = section_vectors(secs, cfg, embed, cache_path)
+    mu = M.mean(0)
+    return notes, secs, M, mu
+
+def _centre(X, mu):
+    import numpy as np
+    Y = X - mu
+    n = np.linalg.norm(Y, axis=1, keepdims=True); n[n == 0] = 1.0
+    return Y / n
+
+def place(vault, cfg, text, embed=None, cache_path=None, exclude=(), top=8):
+    """The shortlist: each section of the new text against every section of every placeable note,
+    mean-centred cosine. Returns ranked notes (the nearest section in each), ranked folders, the lean
+    (the folder the nearest notes share, if they share one), and a verdict that is only ever
+    SHORTLIST, NO HOME (the lead comes no nearer than unrelated text does) or EMPTY. A reader
+    decides; the keeper ratifies. `exclude`: the text's own note, when it is already in the vault."""
+    import numpy as np
+    embed = embed or embedder()
+    q = [x for x in sections_of(text.encode("utf-8") if isinstance(text, str) else text, "(new)") if x["words"] > 0]
+    if not q:
+        return {"verdict": "EMPTY", "notes": [], "folders": [], "lean": None, "why": "no words to place"}
+    notes, secs, M, mu = _corpus(vault, cfg, embed, cache_path, exclude)
+    if M is None:
+        return {"verdict": "NO HOME", "notes": [], "folders": [], "lean": None, "why": "nothing placeable in scope to compare with"}
+    Q = _centre(section_vectors(q, cfg, embed, cache_path), mu)
+    S = _centre(M, mu)
+    best = (Q @ S.T).max(0)
+    by_note = defaultdict(list)
+    for k, x in enumerate(secs):
+        by_note[x["note"]].append(k)
+    ranked = []
+    for rel, ks in by_note.items():
+        k = max(ks, key=lambda k: best[k])
+        ranked.append({"note": rel, "sim": round(float(best[k]), 3),
+                       "section": {"pid": secs[k]["pid"], "heading": secs[k]["heading"], "start": secs[k]["start"], "end": secs[k]["end"]}})
+    ranked.sort(key=lambda r: -r["sim"])
+    median = float(np.median([r["sim"] for r in ranked])) if ranked else 0.0
+    ranked = ranked[:top]
+    folders = []
+    for r in ranked:
+        d = os.path.dirname(r["note"])
+        if d not in [f["folder"] for f in folders]:
+            folders.append({"folder": d, "sim": r["sim"], "by": r["note"]})
+    floor = None
+    if embed is not fake_embed:                     # the model's own score for unrelated text, centred the same way
+        P = _centre(np.array(embed(["clustering: " + t for t in PROBE], cfg), dtype=float), mu)
+        floor = round(float(P[0] @ P[2]), 3)
+    lead = ranked[0]
+    top3 = [os.path.dirname(r["note"]) for r in ranked[:3] if r["sim"] > median]   # only notes above the median count
+    shared = [d for d in set(top3) if top3.count(d) >= 2]
+    lean = shared[0] if shared else (top3[0] if top3 else None)                    # a shared folder, else the lead's
+    if floor is not None and lead["sim"] <= floor:
+        verdict, why = "NO HOME", f"the nearest note scores {lead['sim']}, no nearer than unrelated text ({floor}) — a reader must place it from the text alone"
+    else:
+        verdict = "SHORTLIST"
+        why = (f"nearest `{lead['note']}` at {lead['sim']} (median note {median:.3f}); "
+               + (f"{top3.count(lean)} of the nearest above the median share `{lean}/`" if lean and top3.count(lean) >= 2
+                  else f"lean `{lean}/` by the lead alone" if lean else "nothing above the median")
+               + " — a shortlist for the reader, not a placement")
+    return {"verdict": verdict, "why": why, "notes": ranked, "folders": folders, "lean": lean, "floor": floor,
+            "median": round(median, 3), "query_sections": len(q)}
+
+def place_control(vault, cfg, embed=None, cache_path=None, seed=11):
+    """The search must prove it looked: a section lifted from a placeable note, with the note still
+    present, must rank that note first at ~1.0; excluded, the note must not appear. Returns problems."""
+    import random
+    embed = embed or embedder()
+    rnd = random.Random(seed)
+    cands = []
+    for rel in _targets(cfg, scope(vault, cfg)):
+        ss = [x for x in sections_of(read_bytes(vault, rel), rel) if x["words"] >= MIN_WORDS]
+        if ss:
+            cands.append((rel, ss))
+    if not cands:
+        return ["no placeable note with a rankable section to lift a control from"]
+    rel, ss = rnd.choice(cands)
+    sec = rnd.choice(ss)
+    r = place(vault, cfg, sec["text"], embed, cache_path)
+    probs = []
+    if not r["notes"] or r["notes"][0]["note"] != rel:
+        probs.append(f"control: a section of {rel} did not rank it first (top: {r['notes'][0]['note'] if r['notes'] else None})")
+    elif r["notes"][0]["sim"] < 0.999:
+        probs.append(f"control: its own section scored {r['notes'][0]['sim']}, not 1.0")
+    r2 = place(vault, cfg, sec["text"], embed, cache_path, exclude=[rel])
+    if any(n["note"] == rel for n in r2["notes"]):
+        probs.append(f"control: an excluded note still appears ({rel})")
+    return probs
+
+def place_calibrate(vault, cfg, embed=None, cache_path=None, n=25, seed=7):
+    """How far the shortlist can be trusted on THIS vault, measured: sections lifted from notes that
+    have at least two rankable sections, own note excluded — how often the nearest other note is in
+    the same folder, and how often the note's own remaining sections would have beaten every other
+    note. Returned with every report; it is the number a reader weighs the shortlist by."""
+    import random, numpy as np
+    embed = embed or embedder()
+    notes, secs, M, mu = _corpus(vault, cfg, embed, cache_path)
+    if M is None:
+        return {"trials": 0}
+    S = _centre(M, mu)
+    note_of = np.array([x["note"] for x in secs])
+    by_note = defaultdict(list)
+    for k, x in enumerate(secs):
+        by_note[x["note"]].append(k)
+    multi = sorted(k for k, v in by_note.items() if len(v) >= 2)
+    rnd = random.Random(seed)
+    trials = [(rel, rnd.choice(by_note[rel])) for rel in rnd.sample(multi, min(n, len(multi)))]
+    folder_hit = own_wins = 0
+    for rel, k in trials:
+        mask = note_of != rel
+        sims = S[mask] @ S[k]
+        top = note_of[mask][int(np.argmax(sims))]
+        folder_hit += os.path.dirname(top) == os.path.dirname(rel)
+        own = S[[j for j in by_note[rel] if j != k]] @ S[k]
+        own_wins += float(own.max()) > float(sims.max())
+    return {"trials": len(trials), "same_folder_top1": folder_hit, "own_note_wins": own_wins, "seed": seed,
+            "sections": len(secs), "notes": len(notes)}
+
+def place_md(r, label, cal=None):
+    L = [f"# Placement shortlist — {label}", "", f"**{r['verdict']}** — {r.get('why', '')}", ""]
+    if cal and cal.get("trials"):
+        L += [f"**How far to trust this list, measured on this vault:** of {cal['trials']} sections lifted from their notes, the nearest "
+              f"other note was in the same folder {cal['same_folder_top1']} times, and the note's own remaining sections would have won "
+              f"{cal['own_note_wins']} times. The list narrows the reading; it does not place.", ""]
+    if r.get("notes"):
+        L += ["| # | note | nearest section | sim |", "|---|---|---|---|"]
+        for n, x in enumerate(r["notes"], 1):
+            L.append(f"| {n} | `{x['note']}` | {x['section']['pid']} L{x['section']['start']}–L{x['section']['end']} {x['section']['heading']} | {x['sim']} |")
+        L += ["", "Folders, by their nearest note: " + " · ".join(f"`{f['folder']}/` ({f['sim']})" for f in r["folders"]),
+              f"Lean: `{r['lean']}/`" if r.get("lean") else "Lean: none — the nearest notes are in different folders", ""]
+    if r.get("floor") is not None:
+        L.append(f"Floor: unrelated text scores about {r['floor']} on this model, centred the same way; a lead at or below it is NO HOME.")
+    L += ["", "Every score only ranks. Two readers read the text against this list and record where it belongs; where they agree, "
+          "the keeper ratifies, and the placement runs as a plan (`mv` into the folder, or `extend` the note, the source archived).", ""]
+    return "\n".join(L)
+
+def cmd_place(V, cfg, argv):
+    """place <file-or-vault-note> [--exclude <note>]… [--calibrate] — the shortlist for a reader."""
+    args, exclude, recal = argv[1:], [], False
+    while "--exclude" in args:
+        i = args.index("--exclude"); exclude.append(args[i + 1]); del args[i:i + 2]
+    if "--calibrate" in args:
+        recal = True; args.remove("--calibrate")
+    if len(args) != 1:
+        print("place    : need one file (a path on disk, or a note path inside the vault)"); return 2
+    src = args[0]
+    inside = os.path.isfile(os.path.join(V, src))
+    path = os.path.join(V, src) if inside else os.path.expanduser(src)
+    if not os.path.isfile(path):
+        print(f"place    : no such file: {src}"); return 2
+    if inside and src not in exclude:
+        exclude.append(src)                           # a note already in the vault must not find itself
+    with open(path, "rb") as fh:
+        text = fh.read()
+    cache = os.path.join(sema_dir(), "embeddings.json")
+    probs = place_control(V, cfg, cache_path=cache)
+    print("control  : " + ("the search proves it looked" if not probs else f"{len(probs)} problem(s)"))
+    for p in probs:
+        print("   " + p)
+    if probs:
+        return 1
+    calp = os.path.join(sema_dir(), "place-calibration.json")
+    cal = None
+    if os.path.exists(calp) and not recal:
+        with open(calp, encoding="utf-8") as fh:
+            cal = json.load(fh)
+    if cal is None or cal.get("sections") != len(_corpus(V, cfg, embedder(), cache)[1]):
+        cal = place_calibrate(V, cfg, cache_path=cache)
+        cal["when"] = C.ts()
+        with open(calp, "w", encoding="utf-8") as fh:
+            json.dump(cal, fh, indent=1)
+    print(f"measured : same-folder top-1 {cal.get('same_folder_top1')}/{cal.get('trials')} · own-note-wins {cal.get('own_note_wins')}/{cal.get('trials')} (sections {cal.get('sections')})")
+    r = place(V, cfg, text, cache_path=cache, exclude=exclude)
+    out = os.path.join(sema_dir(), f"place-{C.ts()}.md")
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write(place_md(r, src, cal))
+    print(f"place    : {src} — {r['verdict']}")
+    print("   " + r.get("why", ""))
+    for n, x in enumerate(r.get("notes", [])[:8], 1):
+        print(f"   {n}. {x['sim']:.3f}  {x['note']}  ← {x['section']['pid']} {x['section']['heading'][:50]}")
+    print(f"   lean: {r['lean'] + '/' if r.get('lean') else 'none'}   → {out}")
+    return 0
+
 # ---- a synthesis: traceable, or it is a new claim --------------------------------------------
 SOURCE_LINE = re.compile(r"^- \[(S\d+)\] `([^`]+)` (P\d{3}) sha:([0-9a-f]{12})")
 CITE = re.compile(r"\[(S\d+(?:\s*,\s*S\d+)*)\]")
@@ -808,6 +1010,11 @@ USAGE = """semantics.py — the semantic organ
   segment  "<note>"          the note's parts → state/parts-<name>.tsv
   parts    "<note>"          print the note's sha and parts (what a reader cites)
   index                      triage: sections + local embeddings → state/sema/index-<ts>.{json,md}
+  place    <file> [--exclude <note>] [--calibrate]
+                             the shortlist for a reader: the nearest notes (nearest section in each) and
+                             folders by meaning, with how far the list can be trusted, measured on this
+                             vault; NO HOME when nothing comes nearer than unrelated text. A reader
+                             places; the keeper ratifies. A note already in the vault never finds itself
   reading  <A>               coverage of one reading (a .jsonl file, or a folder of them)
   reading  <file> --slice <slices.json> <id>   coverage of one reader's slice: its units, every line once
   propose  <A> <B> [--ruling <rulings.tsv>]
@@ -992,6 +1199,8 @@ def main(argv):
         for p in probs[:40]:
             print("   " + p)
         return 0 if not probs else 1
+    if argv[:1] == ["place"] and len(argv) >= 2:
+        return cmd_place(V, cfg, argv)
     if argv[:1] == ["segment"] and len(argv) == 2:
         return cmd_segment(argv[1])
     if argv[:1] == ["parts"] and len(argv) == 2:

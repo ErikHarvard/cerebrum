@@ -911,6 +911,38 @@ try:
 finally:
     shutil.rmtree(tmp15, ignore_errors=True)
 
+print("== place: a shortlist by meaning that proves it looked, says how far to trust itself, and can say no home ==")
+tmp16 = tempfile.mkdtemp(prefix="cerebrum-place-")
+try:
+    v, ocfg = organ_vault(tmp16)
+    r = SEM.place(v, ocfg, f"{SUNO} a new verse about the same songs", SEM.fake_embed, exclude=["# INBOX/Mixed.md"])
+    check("a text about songs shortlists the songs note first, at its own section, and leans to its folder",
+          r["verdict"] == "SHORTLIST" and r["notes"][0]["note"] == "3 RESOURCES/Songs.md"
+          and r["notes"][0]["section"]["heading"] == "Songwriting" and r["lean"] == "3 RESOURCES")
+    check("the lifting note ranks below the songs note for it", [n["note"] for n in r["notes"]].index("3 RESOURCES/Training.md") > 0)
+    check("the archive is never a target: its copy is absent though it holds the same words",
+          all(not n["note"].startswith("4 ARCHIVE/") for n in SEM.place(v, ocfg, SAME, SEM.fake_embed)["notes"]))
+    r2 = SEM.place(v, ocfg, f"{SUNO} a new verse", SEM.fake_embed, exclude=["# INBOX/Mixed.md", "3 RESOURCES/Songs.md"])
+    check("an excluded note never appears — the text's own note cannot find itself",
+          all(n["note"] != "3 RESOURCES/Songs.md" for n in r2["notes"]))
+    check("the control passes: a lifted section ranks its note first at 1.0, and not when excluded",
+          SEM.place_control(v, ocfg, SEM.fake_embed) == [])
+    real = SEM.place
+    SEM.place = lambda *a, **k: {"verdict": "NO HOME", "notes": [], "folders": [], "lean": None}
+    try:
+        check("a placement that never looks fails the control", SEM.place_control(v, ocfg, SEM.fake_embed) != [])
+    finally:
+        SEM.place = real
+    cal = SEM.place_calibrate(v, ocfg, SEM.fake_embed, n=10)
+    check("calibration measures on this vault: trials run, both counts bounded by them",
+          cal["trials"] > 0 and 0 <= cal["same_folder_top1"] <= cal["trials"] and 0 <= cal["own_note_wins"] <= cal["trials"])
+    check("empty text is EMPTY, not a home", SEM.place(v, ocfg, "   ", SEM.fake_embed)["verdict"] == "EMPTY")
+    md = SEM.place_md(r, "test", cal)
+    check("the report names the verdict, the nearest note, its section, and how far to trust the list",
+          "SHORTLIST" in md and "Songs.md" in md and "Songwriting" in md and "How far to trust" in md)
+finally:
+    shutil.rmtree(tmp16, ignore_errors=True)
+
 print("== registry: a live note inside its archived original is not proposed for removal ==")
 s, root, cfg = K._scratch()
 try:
