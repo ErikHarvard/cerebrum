@@ -235,6 +235,8 @@ def windows(text, size=WINDOW_CHARS):
             cur = f"{cur} {w}" if cur else w
     return out + [cur] if cur or not out else out
 
+_CACHE_LOCK = __import__("threading").Lock()
+
 def section_vectors(secs, cfg, embed, cache_path=None):
     """One unit vector per section — the mean of its windows' embeddings — cached by model, window
     size and section hash, so an unchanged section is never embedded twice."""
@@ -257,8 +259,15 @@ def section_vectors(secs, cfg, embed, cache_path=None):
         for n, (k, _s) in enumerate(todo):
             cache[k] = [round(float(x), 5) for x in np.mean(np.array(acc[n], dtype=float), axis=0)]
         if cache_path:
-            with open(cache_path, "w", encoding="utf-8") as fh:
-                json.dump(cache, fh)
+            with _CACHE_LOCK:                                   # two handlers (ask + place) must not tear the file
+                if os.path.exists(cache_path):                  # merge what another writer added meanwhile
+                    with open(cache_path, encoding="utf-8") as fh:
+                        try: cache = {**json.load(fh), **cache}
+                        except ValueError: pass
+                tmp = cache_path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(cache, fh)
+                os.replace(tmp, cache_path)
     M = np.array([cache[key(s)] for s in secs], dtype=float).reshape(len(secs), -1)
     norm = np.linalg.norm(M, axis=1, keepdims=True)
     norm[norm == 0] = 1.0

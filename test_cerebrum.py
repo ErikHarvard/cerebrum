@@ -1143,6 +1143,37 @@ try:
 finally:
     shutil.rmtree(tmp21, ignore_errors=True)
 
+print("== cerebrum.py undo: the command wrapper, not only the function (found crashing 2026-09-15) ==")
+import argparse as _ap
+tmp26 = tempfile.mkdtemp(prefix="cerebrum-cmdundo-")
+_rv, _rs, _rc = C.VAULT, C.STATE, C.CFG
+try:
+    v, ocfg = organ_vault(tmp26)
+    before = manifest(v)
+    bpath = os.path.join(tmp26, "manifest-before.tsv")
+    with open(bpath, "w", encoding="utf-8") as fh:
+        for h, sz, rel in before:
+            fh.write(f"{h}\t{sz}\t{rel}\n")
+    ops = write_plan(os.path.join(tmp26, "plan.tsv"), ["mv\t2 AREAS/Copy A.md\t3 RESOURCES/Copy A.md"])
+    undo26 = os.path.join(tmp26, "undo.tsv")
+    ok, f, _ = C.apply_plan(v, ops, before, C._scratch_trash_fn(os.path.join(tmp26, "_t")), undo26, before_path=bpath)
+    check("a plan applied with its before-manifest named in the undo map", ok and C.undo_before_path(undo26) == bpath)
+    C.VAULT, C.STATE, C.CFG = v, tmp26, dict(C.CFG, law="", registry="")
+    try:
+        rc = C.cmd_undo(_ap.Namespace(log=undo26, i_ratified=False))
+        crashed = ""
+    except Exception as e:
+        rc, crashed = -1, repr(e)
+    check("cmd_undo reverses the run AND verifies the vault against the before-manifest without crashing (rc 0)",
+          rc == 0 and not crashed and os.path.isfile(os.path.join(v, "2 AREAS", "Copy A.md")) and not os.path.exists(os.path.join(v, "3 RESOURCES", "Copy A.md")))
+    if crashed: print("      crashed:", crashed)
+    open(os.path.join(v, "2 AREAS", "Copy A.md"), "a").write("tampered after undo\n")
+    ok2, f2, _ = C.apply_plan(v, ops, manifest(v), C._scratch_trash_fn(os.path.join(tmp26, "_t2")), undo26 + ".2", before_path=bpath)
+    rc2 = C.cmd_undo(_ap.Namespace(log=undo26 + ".2", i_ratified=False))
+    check("… and reports RED (rc 1) when the vault after undo differs from that manifest", rc2 == 1)
+finally:
+    C.VAULT, C.STATE, C.CFG = _rv, _rs, _rc
+
 print("== the Archivist: capture, two local readers through the gate, ask — with a canned model ==")
 import archivist as AR
 tmp22 = tempfile.mkdtemp(prefix="cerebrum-archivist-")
@@ -1188,6 +1219,22 @@ try:
         check("ask names its sources, every one a real note and section of the vault (the stand-in embedder cannot rank by meaning; the real one is calibrated by `place`)",
               bool(a["sources"]) and all(os.path.isfile(os.path.join(v, x["note"])) and x["pid"].startswith("P") for x in a["sources"]))
         check("ask changed nothing in the vault", open(os.path.join(v, "3 RESOURCES", "Songs.md"), "rb").read().startswith(b"# Songwriting"))
+        # the lexical channel: a note named by its title, whose body never repeats the title
+        with open(os.path.join(v, "3 RESOURCES", "Rite of the Turning.md"), "w", encoding="utf-8") as fh:
+            fh.write("# Ceremony\n\nA candle is lit, the house is entered, the name is spoken aloud, and the witness seals it.\n\n## Second\n\nThe return is walked in silence with the hearth behind and the road ahead.\n")
+        SEM.MIN_WORDS = 5
+        try:
+            hits_on = AR.retrieve(v, ocfg, "What is the Rite of the Turning?", cache_path=None)
+            hits_off = AR.retrieve(v, ocfg, "What is the Rite of the Turning?", cache_path=None, lexical=False)
+        finally:
+            SEM.MIN_WORDS = mw
+        check("retrieve: a question naming a note by its title finds that note first through the lexical channel",
+              bool(hits_on) and hits_on[0]["note"] == "3 RESOURCES/Rite of the Turning.md")
+        check("… and by meaning alone (the stand-in embedder sees only body words) it does not — the channel is not vacuous",
+              bool(hits_off) and hits_off[0]["note"] != "3 RESOURCES/Rite of the Turning.md")
+        check("retrieve: the fused order still returns real sections with their similarity by meaning",
+              all(os.path.isfile(os.path.join(v, h["note"])) and isinstance(h["sim"], float) for h in hits_on))
+        os.remove(os.path.join(v, "3 RESOURCES", "Rite of the Turning.md"))
         AR.llm = lambda messages, **k: "# Polished\n\nThe verse names its tempo and its hook.\n"
         rel3 = AR.capture(v, ocfg, "polish me", "teh verse names its tempo adn its hook", do_polish=True)
         body3 = open(os.path.join(v, rel3), encoding="utf-8").read()
@@ -1303,5 +1350,143 @@ finally:
     shutil.rmtree(s, ignore_errors=True)
 
 print()
+
+print("== 2026-09-15 audit fixes: the live undo branch, the HTTP surface, the snapshot gate, the dry run, titles, the rehearsal flag, collisions ==")
+import argparse as _ap, threading as _th, http.client as _hc, http.server as _hs
+tmp27 = tempfile.mkdtemp(prefix="cerebrum-audit-")
+_rv, _rs, _rc, _rsn = C.VAULT, C.STATE, C.CFG, C.SNAPS
+try:
+    # H1 — cmd_undo on the LIVE branch (is_real True, Obsidian closed) used to raise NameError before touching anything
+    v, ocfg = organ_vault(tmp27)
+    before = manifest(v); bpath = os.path.join(tmp27, "manifest-before.tsv")
+    with open(bpath, "w", encoding="utf-8") as fh:
+        for h, sz, rel in before: fh.write(f"{h}\t{sz}\t{rel}\n")
+    ops = write_plan(os.path.join(tmp27, "plan.tsv"), ["mv\t2 AREAS/Copy A.md\t3 RESOURCES/Copy A.md"])
+    undo27 = os.path.join(tmp27, "undo.tsv")
+    ok, f, _ = C.apply_plan(v, ops, before, C._scratch_trash_fn(os.path.join(tmp27, "_t")), undo27, before_path=bpath)
+    C.VAULT, C.STATE, C.CFG = v, tmp27, dict(C.CFG, law="", registry="")
+    _ir, _or = C._is_real, C._obsidian_running
+    C._is_real, C._obsidian_running = (lambda p: True), (lambda: False)
+    try:
+        rc = C.cmd_undo(_ap.Namespace(log=undo27, i_ratified=True)); crashed = ""
+    except Exception as e:
+        rc, crashed = -1, repr(e)
+    finally:
+        C._is_real, C._obsidian_running = _ir, _or
+    check("cmd_undo on the live branch runs (the trash function it names exists), reverses and verifies — rc 0",
+          rc == 0 and not crashed and os.path.isfile(os.path.join(v, "2 AREAS", "Copy A.md")))
+    if crashed: print("      crashed:", crashed)
+    C.VAULT, C.STATE, C.CFG = _rv, _rs, _rc
+
+    # M3 — undo never aborts half-done: a made folder that gained a stray file, a vacated path re-occupied
+    v3, _ = organ_vault(os.path.join(tmp27, "m3"))
+    ops3 = write_plan(os.path.join(tmp27, "plan3.tsv"), ["mkdir\t3 RESOURCES/X", "mv\t2 AREAS/Copy A.md\t3 RESOURCES/X/Copy A.md",
+                                                          "mkdir\t3 RESOURCES/Y", "mv\t2 AREAS/Aph.md\t3 RESOURCES/Y/Aph.md"])
+    u3 = os.path.join(tmp27, "undo3.tsv")
+    ok3, _, _ = C.apply_plan(v3, ops3, manifest(v3), C._scratch_trash_fn(os.path.join(tmp27, "_t3")), u3)
+    open(os.path.join(v3, "3 RESOURCES", "Y", "stray.md"), "w").write("not the plan's\n")
+    open(os.path.join(v3, "2 AREAS", "Copy A.md"), "w").write("re-occupied\n")
+    try:
+        notes3 = C.undo_plan(v3, u3); raised = ""
+    except Exception as e:
+        notes3, raised = None, repr(e)
+    check("undo with a stray file in a made folder and a re-occupied path finishes every other reversal and NOTES both",
+          ok3 and not raised and notes3 and any("could not remove the made folder" in n for n in notes3)
+          and any("could not move" in n for n in notes3) and os.path.isfile(os.path.join(v3, "2 AREAS", "Aph.md"))
+          and not os.path.exists(os.path.join(v3, "3 RESOURCES", "Y", "Aph.md"))
+          and os.path.isfile(os.path.join(v3, "3 RESOURCES", "X", "Copy A.md")))     # left where it is, and said so
+    if raised: print("      raised:", raised)
+
+    # M4 — a MISMATCH archive never satisfies the snapshot gate (a dangling symlink is listed but not archived as a file)
+    v4, _ = organ_vault(os.path.join(tmp27, "m4"))
+    os.symlink(os.path.join(tmp27, "nowhere.md"), os.path.join(v4, "3 RESOURCES", "dangling.md"))
+    C.SNAPS = os.path.join(tmp27, "snaps"); os.makedirs(C.SNAPS)
+    ok4, out4, lines4 = C.take_snapshot(v4)
+    check("a snapshot that does not hold every listed file is MISMATCH, kept under a name the gate does not see",
+          not ok4 and out4.endswith(".MISMATCH") and os.path.isfile(out4) and "MISMATCH" in lines4[0]
+          and C.snapshot_stale(C.SNAPS, tmp27) == "no snapshot exists")
+    os.remove(os.path.join(v4, "3 RESOURCES", "dangling.md"))
+    ok4b, out4b, _ = C.take_snapshot(v4)
+    check("… and a good snapshot after it satisfies the gate", ok4b and out4b.endswith(".tar.gz") and C.snapshot_stale(C.SNAPS, tmp27) == "")
+    C.SNAPS = _rsn
+
+    # M6 — trash of a file the plan itself creates is refused by the dry run, never a KeyError
+    v6, _ = organ_vault(os.path.join(tmp27, "m6"))
+    sha6 = C.sha256(os.path.join(v6, "2 AREAS", "Copy A.md"))
+    ops6 = write_plan(os.path.join(tmp27, "plan6.tsv"), ["mv\t2 AREAS/Copy A.md\t4 ARCHIVE/Copy A — original.md",
+        f"partition\t4 ARCHIVE/Copy A — original.md\t{sha6}", "compose\t3 RESOURCES/New.md\t4 ARCHIVE/Copy A — original.md\tL1-L2", "trash\t3 RESOURCES/New.md"])
+    try:
+        errs6, _, _ = C.simulate(v6, ops6, manifest(v6)); raised6 = ""
+    except Exception as e:
+        errs6, raised6 = None, repr(e)
+    check("dry run: trashing a note the plan composes is REFUSED with a reason, not a crash",
+          not raised6 and errs6 and any("this plan creates" in e for e in errs6))
+    if raised6: print("      raised:", raised6)
+
+    # M7 — the title judge counts only a judged true as a fixed point
+    check("titles: an error reply, an empty reply and the string 'false' are NOT fixed points; only true is",
+          AR._fixed_point({"fixed_point": True}) and not AR._fixed_point({"error": "x"}) and not AR._fixed_point({})
+          and not AR._fixed_point({"fixed_point": "false"}) and not AR._fixed_point("nonsense"))
+
+    # M9 — a rehearsal is a proof of one kind of run
+    pl9 = os.path.join(tmp27, "plan9.tsv"); open(pl9, "w").write("mkdir\t3 RESOURCES/Z\n")
+    C.rehearsal_record(pl9, tmp27, True, False)
+    check("a strict rehearsal does not license a --frozen-live run, and does license a strict one",
+          C.rehearsal_missing(pl9, tmp27, frozen_live=True) != "" and C.rehearsal_missing(pl9, tmp27, frozen_live=False) == "")
+
+    # M10 — same-second files never collide
+    p10 = os.path.join(tmp27, "undo-20260101-000000.tsv"); open(p10, "w").write("")
+    check("fresh_path steps past an existing file (and keeps .tar.gz whole)",
+          C.fresh_path(p10).endswith("undo-20260101-000000-2.tsv") and C.fresh_path(os.path.join(tmp27, "vault-x.tar.gz")).endswith("vault-x.tar.gz")
+          and (open(os.path.join(tmp27, "vault-x.tar.gz"), "w").write("") or True) and C.fresh_path(os.path.join(tmp27, "vault-x.tar.gz")).endswith("vault-x-2.tar.gz"))
+
+    # L3 — a title can never carry a newline into a filename
+    check("safe_title strips control characters", "\n" not in AR.safe_title("a\nb\tc") and AR.safe_title("a\nb") == "a b")
+
+    # H3 / L1 / L2 / M8 — the HTTP surface, driven over a real socket
+    vh, hcfg = organ_vault(os.path.join(tmp27, "http"))
+    _real_log = AR.LOG; AR.LOG = os.path.join(tmp27, "archivist.log")
+    _hv, _hcfg, _hp = AR.Handler.vault, AR.Handler.cfg, AR.Handler.port
+    C.STATE = tmp27
+    srv = _hs.ThreadingHTTPServer(("127.0.0.1", 0), AR.Handler); port = srv.server_address[1]
+    AR.Handler.vault, AR.Handler.cfg, AR.Handler.port = vh, hcfg, port
+    th = _th.Thread(target=srv.serve_forever, daemon=True); th.start()
+    def call(method, path, body=None, origin=None, ctype="application/json"):
+        c = _hc.HTTPConnection("127.0.0.1", port, timeout=10)
+        hdr = {"Content-Type": ctype}
+        if origin: hdr["Origin"] = origin
+        c.request(method, path, body=body if isinstance(body, (bytes, type(None))) else json.dumps(body), headers=hdr)
+        r = c.getresponse(); data = r.read(); c.close()
+        return r.status, dict(r.getheaders()), data
+    try:
+        st, _, _ = call("POST", "/api/capture", {"title": "Injected", "text": "by a web page"}, origin="https://evil.example")
+        check("a POST from a foreign origin is refused (403) and captures nothing",
+              st == 403 and not os.path.exists(os.path.join(vh, "# INBOX", "Injected.md")))
+        st, _, _ = call("POST", "/api/capture", b'{"title":"Plain","text":"simple request"}', ctype="text/plain")
+        check("a non-JSON content type (the cross-site 'simple request') is refused (415)", st == 415 and not os.path.exists(os.path.join(vh, "# INBOX", "Plain.md")))
+        st, _, data = call("POST", "/api/capture", {"title": "From shell", "text": "hello there", "polish": False})
+        check("the keeper's own shell (no Origin) captures", st == 200 and os.path.isfile(os.path.join(vh, "# INBOX", "From shell.md")))
+        st, _, _ = call("POST", "/api/capture", {"title": "From page", "text": "hello there", "polish": False}, origin=f"http://127.0.0.1:{port}")
+        check("the Archivist's own page captures", st == 200 and os.path.isfile(os.path.join(vh, "# INBOX", "From page.md")))
+        st, hdrs, _ = call("OPTIONS", "/api/capture", origin="app://obsidian.md")
+        check("the Obsidian plugin's preflight is answered for its origin only",
+              st == 204 and hdrs.get("Access-Control-Allow-Origin") == "app://obsidian.md" and call("OPTIONS", "/api/capture", origin="https://evil.example")[0] == 403)
+        st, hdrs, _ = call("POST", "/api/capture", {"title": "From plugin", "text": "hello there", "polish": False}, origin="app://obsidian.md")
+        check("… and its POST is allowed and answered with the CORS header", st == 200 and hdrs.get("Access-Control-Allow-Origin") == "app://obsidian.md")
+        st1, _, _ = call("POST", "/api/place", {"note": "/etc/hostname"}); st2, _, _ = call("POST", "/api/place", {"note": "../../etc/hostname"})
+        st3, _, _ = call("POST", "/api/polish", {"note": os.path.join(vh, "# INBOX", "From shell.md")})
+        check("place/polish refuse an absolute path, a `..` path and a path outside the vault (400)", st1 == 400 and st2 == 400 and st3 == 400)
+        os.makedirs(os.path.join(tmp27, "state-evil")); ev = os.path.join(tmp27, "state-evil", "intake-20260101-000000.tsv"); open(ev, "w").write("mkdir\t3 RESOURCES/Q\n")
+        sema = SEM.sema_dir(); odd = os.path.join(sema, "plan-notebooks.tsv"); open(odd, "w").write("mkdir\t3 RESOURCES/Q\n")
+        r1 = json.loads(call("POST", "/api/ratify", {"plan": ev})[2]); r2 = json.loads(call("POST", "/api/ratify", {"plan": odd})[2])
+        check("ratify accepts only an intake plan the Archivist wrote, under its own sema dir", r1["ok"] is False and r2["ok"] is False and "not a plan" in r1["steps"][0][1])
+        st, _, data = call("POST", "/api/capture", b"{not json")
+        check("a malformed body is a 400, not a dropped connection", st == 400 and b"bad request" in data)
+    finally:
+        srv.shutdown(); srv.server_close()
+        AR.Handler.vault, AR.Handler.cfg, AR.Handler.port = _hv, _hcfg, _hp; AR.LOG = _real_log; C.STATE = _rs
+finally:
+    C.VAULT, C.STATE, C.CFG, C.SNAPS = _rv, _rs, _rc, _rsn
+
 print(f"RESULT: {'ALL PASS' if not fails else 'FAILURES: ' + ', '.join(fails)}")
 sys.exit(1 if fails else 0)

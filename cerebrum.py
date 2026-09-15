@@ -61,6 +61,17 @@ PARA = tuple(CFG.get("para", ["# INBOX", "1 PROJECTS", "2 AREAS", "3 RESOURCES",
 def ts():
     return datetime.now().strftime("%Y%m%d-%H%M%S")
 
+def fresh_path(path):
+    """`path` if nothing is there; else the first `stem-2.ext`, `stem-3.ext`… that is free. Two runs in one second
+    (a double click on the page) must never share an undo map, an expectation file or a snapshot."""
+    if not os.path.lexists(path):
+        return path
+    stem, ext = (path[:-len(".tar.gz")], ".tar.gz") if path.endswith(".tar.gz") else os.path.splitext(path)
+    n = 2
+    while os.path.lexists(f"{stem}-{n}{ext}"):
+        n += 1
+    return f"{stem}-{n}{ext}"
+
 def rels(vault):
     for root, _dirs, files in os.walk(vault):
         for f in files:
@@ -110,7 +121,7 @@ def take_snapshot(vault):
     aborting the backup. OK only if every MOVABLE file listed is in the archive.
     Returns (ok, archive path, summary lines)."""
     ensure_dirs()
-    out = f"{SNAPS}/vault-{ts()}.tar.gz"
+    out = fresh_path(f"{SNAPS}/vault-{ts()}.tar.gz")
     listed, vanished = [], []
     with tarfile.open(out, "w:gz") as tar:
         for root, _dirs, files in os.walk(vault):
@@ -129,9 +140,12 @@ def take_snapshot(vault):
     movable = [r for r in listed if not is_frozen(r)]
     missing_movable = [r for r in movable if r not in names]
     ok = not missing_movable and len(names) == len(listed) - len(vanished)
+    if not ok:                                   # a failed backup is not a backup: it must never satisfy §VII.1
+        failed = out + ".MISMATCH"
+        os.replace(out, failed); out = failed
     lines = [f"files listed={len(listed)}  in archive={len(names)}  "
              f"movable {len(movable) - len(missing_movable)}/{len(movable)}  "
-             f"{'OK' if ok else 'MISMATCH — DO NOT PROCEED'}"]
+             f"{'OK' if ok else 'MISMATCH — DO NOT PROCEED (archive kept as ' + os.path.basename(out) + ')'}"]
     if vanished:
         lines.append(f"{len(vanished)} file(s) vanished while archiving"
                      + (" — all inside frozen (live) folders" if not missing_movable
@@ -686,6 +700,7 @@ def simulate(vault, ops, before_rows):
         elif op == "trash":
             (p,) = args
             if p not in files: errors.append(f"line {n}: trash target is not a file: {p}"); continue
+            if origin[p] not in before_hash: errors.append(f"line {n}: trash of a file this plan creates is refused: {p}"); continue
             removed.append(origin[p]); files.pop(p); origin.pop(p); buf.pop(p, None)
         elif op == "merge":
             dst, srcs = args[0], args[1:]
@@ -786,7 +801,7 @@ def simulate(vault, ops, before_rows):
     report = {
         "by_top": dict(Counter(c.split("/")[0] if "/" in c else "(vault root)" for c in movable)),
         "unrouted": sorted(c for c in movable if c.split("/")[0] not in PARA),
-        "too_deep": sorted(c for c in movable if c.split("/")[0] in PARA[1:] and c.count("/") > 2),
+        "too_deep": [],   # the law no longer caps depth (2026-09-11: notebooks nest as deep as meaning requires)
         "final": {origin[c]: c for c in movable},
     }
     return errors, expect, report
@@ -996,7 +1011,10 @@ def undo_plan(vault, undo_path, trash_fn=None):
         op, args = f[1], f[2:]
         if op == "mkdir":
             if os.path.isdir(J(args[0])):
-                os.rmdir(J(args[0]))
+                try:
+                    os.rmdir(J(args[0]))
+                except OSError:
+                    notes.append(f"could not remove the made folder {args[0]} — it holds files the plan did not put there")
         elif op == "rmdir":
             if not os.path.lexists(J(args[0])):
                 os.mkdir(J(args[0]))
@@ -1004,6 +1022,8 @@ def undo_plan(vault, undo_path, trash_fn=None):
             s, d = args
             if os.path.lexists(J(d)) and not os.path.lexists(J(s)):
                 os.rename(J(d), J(s))
+            elif os.path.lexists(J(d)) and os.path.lexists(J(s)):
+                notes.append(f"could not move {d} back to {s} — something else now stands at {s}")
         elif op == "insert":
             d, start, ln, sha_old = args
             with open(J(d), "rb") as fh: data = fh.read()
@@ -1071,8 +1091,9 @@ def rehearsal_record(plan_path, state, passed, frozen_live):
                    "frozen_live": bool(frozen_live), "when": ts()}, fh, indent=1)
     return p
 
-def rehearsal_missing(plan_path, state):
-    """Why a plan may not run live: no PASS rehearsal is on record for these exact plan bytes."""
+def rehearsal_missing(plan_path, state, frozen_live=None):
+    """Why a plan may not run live: no PASS rehearsal is on record for these exact plan bytes — or it was
+    rehearsed strict and the live run is --frozen-live (or the reverse): a proof of a different run."""
     sha = plan_sha(plan_path)
     p = os.path.join(state, f"rehearsal-{sha[:12]}.json")
     if not os.path.isfile(p):
@@ -1083,6 +1104,9 @@ def rehearsal_missing(plan_path, state):
         return "the rehearsal on record is of different plan bytes"
     if not r.get("pass"):
         return f"the rehearsal on record FAILED ({r.get('when')})"
+    if frozen_live is not None and bool(r.get("frozen_live")) != bool(frozen_live):
+        return ("the rehearsal on record was strict; rehearse with --frozen-live to run that way" if frozen_live
+                else "the rehearsal on record was --frozen-live; rehearse strict to run strict")
     return ""
 
 def ledger(kind, **rec):
@@ -1144,7 +1168,7 @@ def cmd_move(a):
     if real and stale:
         print(f"move: refused. {stale} — the law's step 1: snapshot before any move (cerebrum.py snapshot)."); return 2
     if real:
-        why = rehearsal_missing(a.plan, STATE)
+        why = rehearsal_missing(a.plan, STATE, frozen_live=a.frozen_live)
         if why:
             print(f"move: refused. {why} — rehearse it first (python3 rehearse.py --plan {a.plan})."); return 2
         if cmd_selftest(None) != 0:
@@ -1156,8 +1180,9 @@ def cmd_move(a):
         return 1
     ensure_dirs()
     stamp = ts()
-    undo_path = f"{STATE}/undo-{stamp}.tsv"
-    with open(f"{STATE}/expect-{stamp}.json", "w", encoding="utf-8") as fh:
+    undo_path = fresh_path(f"{STATE}/undo-{stamp}.tsv")
+    expect_path = fresh_path(f"{STATE}/expect-{stamp}.json")
+    with open(expect_path, "w", encoding="utf-8") as fh:
         json.dump(expect, fh, ensure_ascii=False, indent=1)
     trash_fn = _gio_trash if real else _scratch_trash_fn(
         os.path.join(os.path.dirname(os.path.abspath(VAULT)), "_trash"))
@@ -1177,7 +1202,7 @@ def cmd_undo(a):
         print("undo: refused on the live vault without --i-ratified."); return 2
     if real and _obsidian_running():
         print("undo: refused. Close Obsidian first."); return 2
-    notes = undo_plan(VAULT, a.log, trash_fn=_trash if real else None)
+    notes = undo_plan(VAULT, a.log, trash_fn=_gio_trash if real else None)
     ledger("intake", event="undo", log=os.path.abspath(a.log), by="the keeper's word", notes=notes,
            ops=[l.split("\t")[1:4] for l in open(a.log, encoding="utf-8").read().splitlines() if l.split("\t")[1:2] not in (["plan-begin"], ["plan-end"], ["trashed-to"])])
     print("undo     : done" + (" — with notes:" if notes else ""))
@@ -1195,7 +1220,7 @@ def cmd_undo(a):
         if CFG.get("registry"):
             registry.write(VAULT, CFG)
         tolerated = {p: sha256(os.path.join(VAULT, p)) for p in (acta, CFG.get("registry", "")) if p and os.path.isfile(os.path.join(VAULT, p))}
-        ok, fs = _verify(VAULT, _read_manifest(bp), frozen_live=True, expect={"moves": {}, "removed": [], "added": {}, "contained": {}, "hashes": tolerated})
+        ok, fs = _verify(VAULT, _read_manifest(bp), expected_hashes=tolerated, frozen_live=True)
         print("undo     : " + ("verified — the vault equals the manifest the run was planned against" if ok
                                else "RED — the vault does not equal its before-manifest:"))
         if not ok:

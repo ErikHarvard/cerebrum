@@ -108,7 +108,8 @@ def polish(text, url=None):
 
 # ---- capture: the keeper's click puts a note in the inbox ---------------------------------------
 def safe_title(title):
-    t = re.sub(r"[\\/:*?\"<>|]", "—", title.strip()).strip(". ")
+    t = re.sub(r"[\x00-\x1f\x7f]+", " ", title)                      # a newline in a filename breaks every manifest after it
+    t = re.sub(r"[\\/:*?\"<>|]", "—", t.strip()).strip(". ")
     return (t or "Captured")[:120]
 
 def capture(vault, cfg, title, text, source="", do_polish=False, url=None):
@@ -354,7 +355,49 @@ def acta_entry(vault, cfg, plan_path, undo):
                  f"> [!note]- Operations ({len(ops)})\n" + "\n".join(ops) + "\n")
 
 # ---- ask: retrieval by meaning, an answer as a Markdown file, the vault read-only ---------------------
-def retrieve(vault, cfg, question, k=6, cache_path=None):
+def _lexical_order(question, secs):
+    """The lexical channel: BM25 over each section's note title, heading and text. Measured 2026-09-15:
+    a question that names a note by its title ranked that note 18th–86th by meaning alone (nomic, centred);
+    by words it ranked first. Names and coinages are what this vault is made of."""
+    import math
+    import numpy as np
+    tok = lambda t: re.findall(r"[a-z0-9]+", t.lower())
+    docs = [tok(f"{os.path.splitext(os.path.basename(x['note']))[0]} {x['heading']} {x['text']}") for x in secs]
+    n = len(docs)
+    if n == 0:
+        return np.zeros(0, dtype=int)
+    avg = sum(map(len, docs)) / n
+    df = {}
+    for d in docs:
+        for w in set(d):
+            df[w] = df.get(w, 0) + 1
+    q = [w for w in set(tok(question)) if w in df]
+    sc = np.zeros(n)
+    for i, d in enumerate(docs):
+        if not q:
+            break
+        c = {}
+        for w in d:
+            c[w] = c.get(w, 0) + 1
+        norm = 1.2 * (0.25 + 0.75 * len(d) / avg)
+        for w in q:
+            if w in c:
+                sc[i] += math.log(1 + (n - df[w] + 0.5) / (df[w] + 0.5)) * c[w] * 2.2 / (c[w] + norm)
+    return np.argsort(-sc, kind="stable")
+
+def _fuse(orders, n, depth=200, k=60):
+    """Reciprocal-rank fusion: a section ranked early by either channel comes early in the fused order."""
+    import numpy as np
+    sc = np.zeros(n)
+    for o in orders:
+        for r, j in enumerate(o[:depth]):
+            sc[int(j)] += 1.0 / (k + r + 1)
+    return np.argsort(-sc, kind="stable")
+
+def retrieve(vault, cfg, question, k=6, cache_path=None, lexical=True):
+    """The passages nearest the question: by meaning (centred section embeddings) AND by words (BM25 over
+    title, heading and text), fused by reciprocal rank. `lexical=False` is the meaning-only channel, kept
+    so a test can show what it misses."""
     import numpy as np
     embed = S.embedder()
     notes, secs, M, mu = S._corpus(vault, cfg, embed, cache_path)
@@ -362,7 +405,8 @@ def retrieve(vault, cfg, question, k=6, cache_path=None):
         return []
     q = S._centre(S.section_vectors([{"text": question, "words": len(question.split())}], cfg, embed, cache_path), mu)
     sims = (q @ S._centre(M, mu).T)[0]
-    order = np.argsort(-sims)
+    dense = np.argsort(-sims, kind="stable")
+    order = _fuse([dense, _lexical_order(question, secs)], len(secs)) if lexical else dense
     out, chars = [], 0
     for j in order:
         x = secs[int(j)]
@@ -394,7 +438,7 @@ def ask(vault, cfg, question, url=None, cache_path=None):
     log(f"ask\t{question[:80]}\t{len(hits)} passages\t{path}")
     ledger("retrieval", event="ask", question=question, answer=path, model=MODEL, url=url or LLM_URL,
            passages=[{"note": h["note"], "pid": h["pid"], "lines": f"L{h['start']}-L{h['end']}", "heading": h["heading"], "sim": h["sim"]} for h in hits],
-           why="the passages nearest the question by meaning, mean-centred, bounded by the model's window; copied out as a Markdown file, the vault untouched")
+           why="the passages nearest the question by meaning (centred section embeddings) and by words (BM25 over title, heading, text), fused by reciprocal rank, bounded by the model's window; copied out as a Markdown file, the vault untouched")
     return {"markdown": md, "path": path, "sources": [{k: v for k, v in h.items() if k != "text"} for h in hits]}
 
 # ---- titles judged by a reader: is the title the fixed point of the whole? --------------------------
@@ -404,6 +448,11 @@ called its subject. Answer with ONE JSON object and nothing else:
 {"fixed_point": true or false, "better": "" or a better title (a short noun phrase in the keeper's own terms, no punctuation the file system forbids), "why": "one line"}
 A title is the fixed point when a reader who knows only the title would expect exactly these parts and no others. A title that
 names a part, a person, a date, a genre, or a container instead of the whole is not. Keep the keeper's names and neologisms."""
+
+def _fixed_point(j):
+    """Only a judged `true` is a fixed point. A model error, an empty reply, or the string \"false\" is NOT a hold —
+    an instrument that counts its own failures as passes cannot go red (found 2026-09-15)."""
+    return isinstance(j, dict) and j.get("fixed_point") is True
 
 def judge_titles(vault, cfg, url=None, notes=None, say=lambda *_: None):
     """Every placeable note's title judged by the local model against the note's parts and the readers' subject.
@@ -428,7 +477,7 @@ def judge_titles(vault, cfg, url=None, notes=None, say=lambda *_: None):
             j = next((x for x in parse_records(out)), None) or {}
         except Exception as e:
             j = {"error": repr(e)}
-        rows.append({"note": rel, "fixed_point": bool(j.get("fixed_point", True)), "better": str(j.get("better", "") or ""), "why": str(j.get("why", "") or j.get("error", "")),
+        rows.append({"note": rel, "fixed_point": _fixed_point(j), "better": str(j.get("better", "") or ""), "why": str(j.get("why", "") or j.get("error", "")),
                      "inbound": len(S.inbound_links(vault, cfg, rel))})
         say(f"{i}/{len(targets)} {rel[-50:]} → {'fixed point' if rows[-1]['fixed_point'] else 'NOT: ' + rows[-1]['better']}")
     fails = [r for r in rows if not r["fixed_point"]]
@@ -482,11 +531,38 @@ function copyAns(){if(lastMd)navigator.clipboard.writeText(lastMd);}status();</s
 
 _status_cache = {"when": 0.0, "ok": None}
 
+PLUGIN_ORIGIN = "app://obsidian.md"      # the Obsidian plugin (Electron) — the one cross-origin caller allowed
+
+def vault_rel(vault, note):
+    """A note path as the vault knows it, or None: relative, inside the vault after resolving, never `..`."""
+    if not note or os.path.isabs(note) or ".." in note.split("/") or "\\" in note:
+        return None
+    root = os.path.realpath(vault); full = os.path.realpath(os.path.join(vault, note))
+    return note if full.startswith(root + os.sep) else None
+
 class Handler(http.server.BaseHTTPRequestHandler):
     vault, cfg = C.VAULT, C.CFG
+    port = PORT
+    def _own_origins(self):
+        return {f"http://127.0.0.1:{self.port}", f"http://localhost:{self.port}", PLUGIN_ORIGIN}
+    def _origin_ok(self):
+        """A browser sends Origin on every POST; a page from anywhere else on the web must be refused, or any open tab
+        could write into the vault (found 2026-09-15). No Origin = not a browser (curl, a script) — the keeper's own shell."""
+        o = self.headers.get("Origin")
+        return o is None or o in self._own_origins()
+    def _cors(self):
+        if self.headers.get("Origin") == PLUGIN_ORIGIN:
+            self.send_header("Access-Control-Allow-Origin", PLUGIN_ORIGIN); self.send_header("Vary", "Origin")
+    def do_OPTIONS(self):
+        """The plugin's JSON POST is preflighted; answer it for the plugin's origin only."""
+        if self.headers.get("Origin") != PLUGIN_ORIGIN:
+            self.send_response(403); self.send_header("Content-Length", "0"); self.end_headers(); return
+        self.send_response(204); self._cors(); self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type"); self.send_header("Access-Control-Max-Age", "600")
+        self.send_header("Content-Length", "0"); self.end_headers()
     def _json(self, obj, code=200):
         b = json.dumps(obj, ensure_ascii=False, default=str).encode()
-        self.send_response(code); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+        self.send_response(code); self._cors(); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def log_message(self, *a): pass
     def do_GET(self):
         if self.path == "/api/status":
@@ -501,22 +577,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                "model": model_reachable(), "obsidian": C._obsidian_running(), "log": tail})
         b = PAGE.encode(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def do_POST(self):
-        n = int(self.headers.get("Content-Length", 0)); body = json.loads(self.rfile.read(n) or b"{}")
+        if not self._origin_ok():
+            return self._json({"error": "refused: this page is not the Archivist's own"}, 403)
+        if not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
+            return self._json({"error": "refused: JSON only"}, 415)
+        try:
+            n = int(self.headers.get("Content-Length", 0)); body = json.loads(self.rfile.read(n) or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError("body is not an object")
+        except (ValueError, TypeError) as e:
+            return self._json({"error": f"bad request: {e}"}, 400)
         try:
             if self.path == "/api/capture":
                 if not (body.get("text") or "").strip():
                     return self._json({"error": "nothing to capture"}, 400)
                 return self._json({"note": capture(self.vault, self.cfg, body.get("title") or "Captured", body["text"], body.get("source", ""), do_polish=bool(body.get("polish")))})
+            if self.path in ("/api/polish", "/api/place"):
+                note = vault_rel(self.vault, str(body.get("note", "")))
+                if not note or not os.path.isfile(os.path.join(self.vault, note)):
+                    return self._json({"error": f"no such note in the vault: {body.get('note', '')}"}, 400)
             if self.path == "/api/polish":
-                return self._json(polish_note(self.vault, self.cfg, body.get("note", "")))
+                return self._json(polish_note(self.vault, self.cfg, note))
             if self.path == "/api/place":
-                note = body.get("note", "")
-                if not os.path.isfile(os.path.join(self.vault, note)):
-                    return self._json({"error": f"no such note: {note}"}, 400)
                 return self._json(place_note(self.vault, self.cfg, note))
             if self.path == "/api/ratify":
-                p = body.get("plan", "")
-                if not (p and os.path.isfile(p) and os.path.realpath(p).startswith(os.path.realpath(C.STATE))):
+                p = str(body.get("plan", ""))
+                sema = os.path.realpath(S.sema_dir()) + os.sep
+                if not (p and os.path.isfile(p) and os.path.realpath(p).startswith(sema)
+                        and re.fullmatch(r"intake-\d{8}-\d{6}(-\d+)?\.tsv", os.path.basename(p))):
                     return self._json({"ok": False, "steps": [("plan", "not a plan the Archivist wrote")]})
                 return self._json(ratify(self.vault, self.cfg, p))
             if self.path == "/api/ask":
@@ -529,6 +617,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json({"error": repr(e)}, 500)
 
 def serve(port=PORT):
+    Handler.port = port
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"the Archivist : http://127.0.0.1:{port}/  — vault {Handler.vault}  — model {LLM_URL}")
     log(f"serve\t{port}\t{Handler.vault}")
@@ -538,4 +627,6 @@ if __name__ == "__main__":
     if sys.argv[1:2] == ["titles"]:
         rows, path = judge_titles(C.VAULT, C.CFG, say=print)
         print(f"titles   : {sum(1 for r in rows if r['fixed_point'])}/{len(rows)} fixed points → {path}"); sys.exit(0)
+    if sys.argv[1:2] in (["--help"], ["-h"]):
+        print("usage: archivist.py [port]  |  archivist.py titles"); sys.exit(0)
     serve(int(sys.argv[1]) if len(sys.argv) > 1 else PORT)
