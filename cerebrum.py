@@ -193,6 +193,12 @@ def cmd_manifest(_a):
 # markdown-path links — deliberately, so we don't ship an untested resolution path.
 WIKI = re.compile(r"!?\[\[([^\]]+)\]\]")
 
+def link_key(s):
+    """How two names are compared for a link: case-folded and NFC-normalised (a macOS-written NFD filename
+    and an NFC link are the same name to Obsidian; found blind 2026-09-15)."""
+    import unicodedata
+    return unicodedata.normalize("NFC", s).lower()
+
 def _strip_code(text):
     """Remove fenced blocks and inline-code spans — Obsidian does not resolve
     [[links]] inside them, so neither do we (a note ABOUT links is not full of links)."""
@@ -398,19 +404,24 @@ def _verify(vault, before_rows, expected_moves=None, expected_removed=None, expe
     def index(paths):
         bb, allrel, allbase = defaultdict(list), set(), defaultdict(list)
         for r in paths:
-            rl = r.lower(); allrel.add(rl); allbase[os.path.basename(rl)].append(r)
+            rl = link_key(r); allrel.add(rl); allbase[os.path.basename(rl)].append(r)
             if r.endswith(".md"):
-                bb[os.path.basename(r)[:-3].lower()].append(r)
+                bb[os.path.basename(rl)[:-3]].append(r)
         return bb, allrel, allbase
 
     def resolves(t, idx):
         bb, allrel, allbase = idx
-        tl = t.lower()
-        if "/" in t:                                   # a path-style target
-            return tl in allrel or (tl + ".md") in allrel
-        if "." in os.path.basename(t):                 # an attachment (has an extension)
+        tl = link_key(t)
+        if "/" in tl:                                  # a path-style target: from the vault root, or relative to a folder (Obsidian's
+            for cand in (tl, tl + ".md"):              # "relative path" link form) — so a suffix of a real path resolves
+                if cand in allrel or any(r.endswith("/" + cand) for r in allrel):
+                    return True
+            return False
+        if tl in bb:                                   # a note name first — even one that holds a dot (v1.2 Plan)
+            return True
+        if "." in os.path.basename(tl):                # then an attachment (has an extension)
             return tl in allbase
-        return len(bb.get(tl, [])) > 0                 # a wikilink to a note basename
+        return False
 
     ib, ia = index(before_all.keys()), index(after_all.keys())
     ib_movable = index(p for p in before_all if not is_frozen(p))
@@ -629,6 +640,8 @@ def simulate(vault, ops, before_rows):
         for q in [q for q in dirs if q == s or q.startswith(pre)]:
             dirs.discard(q); dirs.add(d + q[len(s):])
 
+    vacated = set()          # paths a mv or trash empties; a later MOVE onto one is refused (verifier blind spot, 2026-09-15);
+                             # a compose/synthesize at a vacated path is fine: its bytes are expected by hash
     for n, op, args in ops:
         paths = args[:2] if op in ("mv", "append", "dedupe") else [] if op in ("leave", "partition") \
             else [args[0], args[2]] if op == "insert" else args[:1]
@@ -684,8 +697,9 @@ def simulate(vault, ops, before_rows):
             if not parent_ok(d): errors.append(f"line {n}: mv destination folder missing: {d}"); continue
             if d.startswith(s + "/"): errors.append(f"line {n}: mv into itself: {s} -> {d}"); continue
             if case_clash(d): errors.append(f"line {n}: mv destination differs only by case from an existing name: {d}"); continue
+            if d in vacated: errors.append(f"line {n}: mv refills a path this plan vacated: {d} — the verifier could not tell it from a note that never moved; split the plan"); continue
             if s in files:
-                files[d] = files.pop(s); origin[d] = origin.pop(s)
+                files[d] = files.pop(s); origin[d] = origin.pop(s); vacated.add(s)
                 if s in buf: buf[d] = buf.pop(s)
             else:
                 rename_prefix(s, d)
@@ -701,7 +715,7 @@ def simulate(vault, ops, before_rows):
             (p,) = args
             if p not in files: errors.append(f"line {n}: trash target is not a file: {p}"); continue
             if origin[p] not in before_hash: errors.append(f"line {n}: trash of a file this plan creates is refused: {p}"); continue
-            removed.append(origin[p]); files.pop(p); origin.pop(p); buf.pop(p, None)
+            removed.append(origin[p]); files.pop(p); origin.pop(p); buf.pop(p, None); vacated.add(p)
         elif op == "merge":
             dst, srcs = args[0], args[1:]
             paths = [s[5:] if s.startswith("code:") else s for s in srcs]

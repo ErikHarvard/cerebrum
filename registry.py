@@ -24,7 +24,10 @@ def _frontmatter(text):
     if not text.startswith("---\n"):
         return {}
     fm = {}
-    for line in text[4:text.find("\n---", 4)].splitlines():
+    end = text.find("\n---", 4)
+    if end < 0:                      # no closing fence: it is not frontmatter (the whole note used to be parsed as one)
+        return {}
+    for line in text[4:end].splitlines():
         if ":" in line and not line.startswith((" ", "-")):
             k, _, val = line.partition(":")
             fm[k.strip()] = val.strip()

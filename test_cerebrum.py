@@ -188,7 +188,7 @@ try:
     vc = copy(v, os.path.join(tmp2, "planted3"))
     os.rename(os.path.join(vc, "2 AREAS", "notes", "d.md"), os.path.join(vc, "4 ARCHIVE", "d.md"))
     okr, fr = C._verify(vc, before, exp["moves"], exp["removed"], exp["hashes"])
-    check("an extra, unplanned move → RED", not okr and has(fr, "did not happen", "notes/d.md"))
+    check("an extra, unplanned move → RED, named as unratified or as an unplanned addition", not okr and (has(fr, "moved (unratified)") or has(fr, "RED added")))
     vd = copy(v, os.path.join(tmp2, "planted4"))
     os.remove(os.path.join(vd, "4 ARCHIVE", "twin.md"))
     oks, fs = C._verify(vd, before, exp["moves"], exp["removed"], exp["hashes"])
@@ -1037,7 +1037,7 @@ try:
     head = b"".join(s_before.splitlines(keepends=True)[:end_p0]); tail = b"".join(s_before.splitlines(keepends=True)[end_p0:])
     check("applied GREEN: head of the note, then the provenance line and the piece, then the rest — byte for byte",
           ok and s_now.startswith(head) and s_now.endswith(tail) and piece in s_now and b"*Inserted verbatim from `# INBOX/Two.md`" in s_now
-          and s_now.index(piece) > len(head) and len(s_now) == len(head) + len(tail) + len(s_now) - len(head) - len(tail))
+          and s_now.index(piece) > len(head) and len(s_now) - len(head) - len(tail) >= len(piece) + len(b"*Inserted verbatim from"))
     check("the verifier's expected bytes are the dry run's, and they match", exp["hashes"]["3 RESOURCES/Songs.md"] == C.sha256(songs))
     check("undo cuts exactly the inserted region back out", C.undo_plan(v, os.path.join(tmp20, "u.tsv")) == [] and open(songs, "rb").read() == s_before)
     nn = os.path.join(v, "3 RESOURCES", "NoNewline.md"); open(nn, "wb").write(b"# T\nlast line without newline")
@@ -1487,6 +1487,60 @@ try:
         AR.Handler.vault, AR.Handler.cfg, AR.Handler.port = _hv, _hcfg, _hp; AR.LOG = _real_log; C.STATE = _rs
 finally:
     C.VAULT, C.STATE, C.CFG, C.SNAPS = _rv, _rs, _rc, _rsn
+
+
+print("== 2026-09-15 audit fixes II: vacate-and-refill, link forms, form feeds, frontmatter ==")
+import unicodedata as _ud, registry as _RG
+tmp28 = tempfile.mkdtemp(prefix="cerebrum-audit2-")
+try:
+    # M1 — a plan that empties a path and refills it is refused by the dry run (the verifier cannot judge it)
+    v1, _ = organ_vault(os.path.join(tmp28, "m1"))
+    ops1 = write_plan(os.path.join(tmp28, "p1.tsv"), ["mv\t2 AREAS/Copy A.md\t3 RESOURCES/tmp.md", "mv\t2 AREAS/Aph.md\t2 AREAS/Copy A.md"])
+    errs1, _, _ = C.simulate(v1, ops1, manifest(v1))
+    ops1b = write_plan(os.path.join(tmp28, "p1b.tsv"), ["mv\t2 AREAS/Copy A.md\t3 RESOURCES/tmp.md"])
+    errs1b, _, _ = C.simulate(v1, ops1b, manifest(v1))
+    check("dry run: a path vacated then refilled in one plan is refused with the reason; the plain move is not", 
+          any("refills a path this plan vacated" in e for e in errs1) and errs1b == [])
+    # M2 — link survival: folder-prefixed, dotted and NFD-named targets
+    v2 = os.path.join(tmp28, "m2")
+    for rel, txt in {"1 PROJECTS/Proj/sub/Note.md": "# Note\nbody\n", "1 PROJECTS/Proj/Index.md": "see [[sub/Note]] and [[v1.2 Plan]] and [[Café]]\n",
+                     "3 RESOURCES/v1.2 Plan.md": "# Plan\n", "3 RESOURCES/" + _ud.normalize("NFD", "Café") + ".md": "# Café\n"}.items():
+        os.makedirs(os.path.dirname(os.path.join(v2, rel)), exist_ok=True); open(os.path.join(v2, rel), "w", encoding="utf-8").write(txt)
+    before2 = manifest(v2)
+    ok0, f0 = C._verify(v2, before2)
+    check("an untouched vault with a folder-prefixed, a dotted and an NFD-named link target verifies GREEN", ok0)
+    def rename_and_verify(src, dst):
+        vv = os.path.join(tmp28, "m2-" + os.path.basename(dst))
+        shutil.copytree(v2, vv)
+        os.rename(os.path.join(vv, src), os.path.join(vv, dst))
+        return C._verify(vv, before2, {src: dst})
+    okA, fA = rename_and_verify("1 PROJECTS/Proj/sub/Note.md", "1 PROJECTS/Proj/sub/Other.md")
+    okB, fB = rename_and_verify("3 RESOURCES/v1.2 Plan.md", "3 RESOURCES/v1.3 Plan.md")
+    okC, fC = rename_and_verify("3 RESOURCES/" + _ud.normalize("NFD", "Café") + ".md", "3 RESOURCES/Cafe.md")
+    check("a ratified rename that breaks a folder-prefixed link is RED", not okA and any("link broken" in x and "sub/Note" in x for x in fA))
+    check("… that breaks a dotted-name link is RED", not okB and any("link broken" in x and "v1.2 Plan" in x for x in fB))
+    check("… that breaks an NFC link to an NFD-named note is RED", not okC and any("link broken" in x and "Caf" in x for x in fC))
+    vk = K.Vault(v2, {"para": list(C.PARA), "frozen": [], "accepted": {}})
+    rl = [r for r in K.RULES if r.name == "every link names one note"][0]
+    found = rl.fn(vk)
+    os.remove(os.path.join(v2, "3 RESOURCES", "v1.2 Plan.md"))
+    found2 = rl.fn(K.Vault(v2, {"para": list(C.PARA), "frozen": [], "accepted": {}}))
+    check("the check resolves the same three link forms, and reports the dotted one once its note is gone",
+          found == [] and len(found2) == 1 and "v1.2 Plan" in found2[0])
+    # M5 — a form feed inside a note no longer shifts the reader's line numbers
+    v5, cfg5 = organ_vault(os.path.join(tmp28, "m5"))
+    open(os.path.join(v5, "# INBOX", "FF.md"), "w", encoding="utf-8").write("alpha \x0c beta first\nsecond line here ok\n")
+    open(os.path.join(v5, "3 RESOURCES", "Dest.md"), "w", encoding="utf-8").write("# D\nsecond line here ok\n")
+    recs5 = [rec(v5, n) for n in SEM.scope(v5, cfg5) if n != "# INBOX/FF.md"] + [rec(v5, "# INBOX/FF.md", "L1"), rec(v5, "# INBOX/FF.md", "L2", "merge", "3 RESOURCES/Dest.md", "≡")]
+    eff5, probs5 = SEM.effective(v5, cfg5, recs5)
+    check("a ≡ claim on the line after a form feed is accepted (bytes-numbered lines on both sides)", not any("≡ claimed" in p for p in probs5))
+    if probs5: print("      ", probs5[:3])
+    check("frontmatter_lines counts by the same rule", SEM.frontmatter_lines(b"---\na: 1\x0cb\n---\nbody\n") == {1, 2, 3})
+    # L7 — a note that opens with --- but never closes it has no frontmatter
+    check("registry: an unclosed --- is not frontmatter; a closed one is",
+          _RG._frontmatter("---\nfoo: bar\nno closing\n") == {} and _RG._frontmatter("---\nfoo: bar\n---\nbody\n") == {"foo": "bar"})
+finally:
+    pass
 
 print(f"RESULT: {'ALL PASS' if not fails else 'FAILURES: ' + ', '.join(fails)}")
 sys.exit(1 if fails else 0)

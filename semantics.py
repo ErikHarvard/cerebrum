@@ -841,8 +841,10 @@ def effective(vault, cfg, recs, notes=None):
                     d = r["dest"]
                     if not os.path.isfile(os.path.join(vault, d)):
                         probs.append(f"{r.get('_at', 'a record')}: {rel}: ≡ into a note that does not exist: {d}"); ok = False; continue
-                    have = {ln.strip() for ln in read_bytes(vault, d).decode("utf-8", "replace").splitlines() if ln.strip()}
-                    mine = data.decode("utf-8", "replace").splitlines()
+                    # bytes.splitlines, as the line numbers were made: str.splitlines also breaks on form feeds and other
+                    # separators, which shifted every line after a \x0c (two real notes hold LaTeX \\f — found 2026-09-15)
+                    have = {ln.decode("utf-8", "replace").strip() for ln in read_bytes(vault, d).splitlines() if ln.strip()}
+                    mine = [ln.decode("utf-8", "replace") for ln in data.splitlines()]
                     missing = [l for l, x in assign.items() if x is r and mine[l - 1].strip() and mine[l - 1].strip() not in have]
                     if missing:
                         probs.append(f"{r.get('_at', 'a record')}: {rel}: ≡ claimed, but L{missing[0]} is not in {d} — a variant is =, not ≡"); ok = False
@@ -960,11 +962,11 @@ def _spec(lines):
 
 def frontmatter_lines(data):
     """The line numbers of a note's YAML frontmatter (the opening and closing --- included), else empty."""
-    lines = (data.decode("utf-8", "replace") if isinstance(data, bytes) else data).splitlines()
-    if not lines or lines[0].strip() != "---":
+    lines = (data if isinstance(data, bytes) else data.encode("utf-8")).splitlines()     # numbered as the organ numbers lines
+    if not lines or lines[0].strip() != b"---":
         return set()
     for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
+        if lines[i].strip() == b"---":
             return set(range(1, i + 2))
     return set()
 

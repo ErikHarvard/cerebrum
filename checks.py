@@ -109,11 +109,12 @@ def _plant_broken_link(v):
 def r_links(v):
     names, paths, files = defaultdict(list), set(), defaultdict(list)
     for p in v.visible:
-        paths.add(p.lower())
-        files[os.path.basename(p).lower()].append(p)
+        pk = C.link_key(p)
+        paths.add(pk)
+        files[os.path.basename(pk)].append(p)
         if MD(p):
-            names[base(p)].append(p)
-            paths.add(p[:-3].lower())
+            names[C.link_key(base(p))].append(p)
+            paths.add(pk[:-3])
     ok = {(x["in"].lower(), x["to"].lower()) for x in v.accepted.get("broken_links", []) if isinstance(x, dict)}
     verbatim = set(v.accepted.get("verbatim", []))    # word-for-word merges: their links are record, not navigation
     sensitive = set(v.accepted.get("sensitive", []))  # never opened
@@ -123,15 +124,15 @@ def r_links(v):
             continue
         for m in C.WIKI.finditer(C._strip_code(v.text(p))):
             t = m.group(1).split("|")[0].split("#")[0].strip()
-            tl = t.lower()
-            if not t or (p.lower(), tl) in ok:
+            tl = C.link_key(t)
+            if not t or (p.lower(), t.lower()) in ok:
                 continue
-            if "/" in t:
-                hits = [t] if (tl in paths or tl + ".md" in paths) else []
-            elif "." in os.path.basename(t) and not tl.endswith(".md"):
-                hits = files.get(tl, [])
+            if "/" in tl:                                     # from the root, or relative to a folder: a suffix of a real path
+                hits = [t] if any(c in paths or any(q.endswith("/" + c) for q in paths) for c in (tl, tl + ".md")) else []
             else:
                 hits = names.get(tl[:-3] if tl.endswith(".md") else tl, [])
+                if not hits and "." in os.path.basename(tl):     # not a note name: an attachment
+                    hits = files.get(tl, [])
             if not hits:
                 out.append(f"{p} → {m.group(0)} names nothing")
             elif len(hits) > 1 and len({v.hash(h) for h in hits}) > 1:
