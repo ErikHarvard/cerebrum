@@ -1233,7 +1233,8 @@ def cmd_undo(a):
                          f"The run reversed from its undo map, on the keeper's word; verified against the manifest it was planned against.\n")
         if CFG.get("registry"):
             registry.write(VAULT, CFG)
-        tolerated = {p: sha256(os.path.join(VAULT, p)) for p in (acta, CFG.get("registry", "")) if p and os.path.isfile(os.path.join(VAULT, p))}
+        tolerated = {p: sha256(os.path.join(VAULT, p)) for p in (acta, CFG.get("registry", ""), CFG.get("archivum", ""))   # the registry regen writes the Archivum too (found live 2026-09-15)
+                     if p and os.path.isfile(os.path.join(VAULT, p))}
         ok, fs = _verify(VAULT, _read_manifest(bp), expected_hashes=tolerated, frozen_live=True)
         print("undo     : " + ("verified — the vault equals the manifest the run was planned against" if ok
                                else "RED — the vault does not equal its before-manifest:"))
