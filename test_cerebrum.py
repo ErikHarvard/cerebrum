@@ -1542,5 +1542,24 @@ try:
 finally:
     pass
 
+
+print("== a split note never carries its frontmatter into a new note (the six-line stub, 2026-09-15) ==")
+tmp29 = tempfile.mkdtemp(prefix="cerebrum-fmstub-")
+v29, cfg29 = organ_vault(tmp29)
+FF = "# INBOX/Captured Idea.md"
+open(os.path.join(v29, FF), "w", encoding="utf-8").write("---\ncaptured: 2026-09-15\nvia: the Archivist\n---\n\n## Idea\n\nthe hook of the song and its tempo, kept as one idea\n")
+recs29 = [rec(v29, n) for n in SEM.scope(v29, cfg29) if n != FF] + [rec(v29, FF, "L1-L5", dest="3 RESOURCES/Idea Stub.md"), rec(v29, FF, "L6-L8", dest="3 RESOURCES/Songs.md")]
+eff29, p29 = SEM.effective(v29, cfg29, recs29)
+agreed29, runs29 = SEM.agree(v29, eff29, eff29)
+plan29, rep29 = SEM.propose(v29, cfg29, agreed29, runs29, today="2026-09-15")
+check("readers sent the header alone to a new note → no note is composed from it; the header is LEFT in the archived original",
+      p29 == [] and not any(l.startswith("compose\t3 RESOURCES/Idea Stub.md") for l in plan29)
+      and any(l.startswith("leave\t") and "L1-L5" in l for l in plan29) and any(l.startswith(("extend\t3 RESOURCES/Songs.md", "insert\t3 RESOURCES/Songs.md")) for l in plan29))
+if p29 or not plan29: print("      ", p29[:3], plan29)
+recs29b = [rec(v29, n) for n in SEM.scope(v29, cfg29) if n != FF] + [rec(v29, FF, dest="3 RESOURCES/Captured Idea.md")]
+eff29b, _ = SEM.effective(v29, cfg29, recs29b); agreed29b, runs29b = SEM.agree(v29, eff29b, eff29b)
+plan29b, _ = SEM.propose(v29, cfg29, agreed29b, runs29b, today="2026-09-15")
+check("… while a note that moves WHOLE keeps its header (a plain mv)", any(l == f"mv\t{FF}\t3 RESOURCES/Captured Idea.md" for l in plan29b))
+
 print(f"RESULT: {'ALL PASS' if not fails else 'FAILURES: ' + ', '.join(fails)}")
 sys.exit(1 if fails else 0)

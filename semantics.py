@@ -1018,6 +1018,15 @@ def propose(vault, cfg, agreed, runs, today=None):
             for l, d in list(place[rel].items()):
                 if d == rel:                                      # the frontmatter and the blanks that follow it
                     place[rel][l] = LEAVE
+        # a note that SPLITS never carries its frontmatter anywhere: the header describes the note it opened, not the
+        # lines that leave it. Readers sent a capture's header alone into a new note (2026-09-15) — a stub of six lines.
+        if fm and len(set(place[rel].values())) > 1:
+            fm_dests = {place[rel][l] for l in fm if l in place[rel]}
+            if fm_dests and fm_dests != {rel}:
+                tail = [l for l in place[rel] if l not in fm and l not in nb[rel] and l - 1 in fm]   # the blank after it
+                for l in list(fm) + tail:
+                    if l in place[rel] and place[rel][l] != rel:
+                        place[rel][l] = LEAVE
     contrib, order = defaultdict(list), []          # dest → [(note, lines)] in note order
     for rel in sorted(place):
         byd = defaultdict(list)
