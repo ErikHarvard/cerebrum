@@ -22,6 +22,11 @@ CTX_CHARS = int(CFG.get("ctx_chars", 9000))            # what fits beside the br
 PORT = int(CFG.get("port", 8765))
 ANSWERS = os.path.join(C.STATE, "answers")
 CACHE_PATH = None                                        # the embeddings cache; None = the organ's own (state/sema)
+AUTO_PLACE = bool(CFG.get("auto_place", True))           # 2026-09-15, the keeper: an agreed placement moves itself; the inbox is a doorway, not a heap
+QUEUE_DIR = os.path.join(C.STATE, "queue")               # agreed plans waiting for Obsidian to close
+
+def _obsidian_open(vault):
+    return C._is_real(vault) and C._obsidian_running()
 LOG = os.path.join(C.STATE, "archivist.log")
 
 def log(msg):
@@ -298,15 +303,72 @@ def place_note(vault, cfg, note, url=None, say=lambda *_: None):
         with open(p, "w", encoding="utf-8") as fh:
             fh.write(f"# the Archivist's intake plan for {note} — proposed, NOT ratified\n" + "".join(l + "\n" for l in r["plan"]))
         r["plan_path"] = p
+        r["placed_into"] = _plan_destination(r["plan"])
     log(f"place\t{note}\t{r['status']}\t" + (r.get("why", "") or ", ".join(r.get("must_read", [])))[:200])
     ledger("intake", event="place", note=note, status=r["status"], plan=r.get("plan_path", ""),
            shortlist=[(x["note"], x["sim"]) for x in sl.get("notes", [])[:5]],
            readers={w: [{"lines": x["lines"], "op": x["op"], "dest": x.get("dest", ""), "at": x.get("at", ""), "why": x.get("why", "")} for x in r["readers"][w] if x["note"] == note] for w in ("A", "B")},
-           plan_lines=r.get("plan", []))
+           plan_lines=r.get("plan", []), auto_place=AUTO_PLACE)
+    if r["status"] == "PLAN" and AUTO_PLACE and r.get("plan_path"):
+        if _obsidian_open(vault):
+            enqueue(r["plan_path"]); r["queued"] = True
+            log(f"auto-place\t{note}\tQUEUED until Obsidian closes\t{r.get('placed_into', '')}")
+        else:
+            r["placed"] = ratify(vault, cfg, r["plan_path"], intake=True)
+            log(f"auto-place\t{note}\t{'GREEN' if r['placed'].get('ok') else 'RED'}\t{r.get('placed_into', '')}")
     return r
 
+def _plan_destination(plan_lines):
+    """The note a capture lands in: the first insert/append/merge/extend/compose target, else the mv destination."""
+    for l in plan_lines:
+        f = l.split("\t")
+        if f[0] in ("insert", "append", "merge", "extend", "compose") and len(f) > 1:
+            return f[1]
+    for l in plan_lines:
+        f = l.split("\t")
+        if f[0] == "mv" and len(f) > 2 and not f[2].startswith("4 ARCHIVE/"):
+            return f[2]
+    return ""
+
+def enqueue(plan_path):
+    os.makedirs(QUEUE_DIR, exist_ok=True)
+    with open(os.path.join(QUEUE_DIR, os.path.basename(plan_path)), "w", encoding="utf-8") as fh:
+        fh.write(os.path.abspath(plan_path) + "\n")
+
+def drain_queue(vault, cfg):
+    """Run every queued agreed placement, oldest first, if Obsidian is closed. Returns [(plan, ok)]. A plan the dry run
+    now refuses (the vault changed) is left in the queue and logged; the note stays in the inbox for the keeper."""
+    if not os.path.isdir(QUEUE_DIR) or _obsidian_open(vault):
+        return []
+    out = []
+    for q in sorted(os.listdir(QUEUE_DIR), key=lambda n: os.path.getmtime(os.path.join(QUEUE_DIR, n))):
+        qp = os.path.join(QUEUE_DIR, q); plan = open(qp, encoding="utf-8").read().strip()
+        if not os.path.isfile(plan):
+            os.remove(qp); continue
+        res = ratify(vault, cfg, plan, intake=True)
+        log(f"auto-place\tqueued {q}\t{'GREEN' if res.get('ok') else 'RED — left in the queue'}")
+        if res.get("ok") or any(s[0] == "undone" for s in res.get("steps", [])):
+            os.remove(qp)
+        out.append((plan, bool(res.get("ok"))))
+        if not res.get("ok"):
+            break
+    return out
+
+def queue_worker(vault, cfg, every=15):
+    """In the service: every `every` seconds, if Obsidian has been closed for two looks in a row, drain the queue."""
+    was_closed = False
+    while True:
+        time.sleep(every)
+        try:
+            closed = not _obsidian_open(vault)
+            if closed and was_closed and os.path.isdir(QUEUE_DIR) and os.listdir(QUEUE_DIR):
+                drain_queue(vault, cfg)
+            was_closed = closed
+        except Exception as e:
+            log(f"error\tqueue\t{e!r}")
+
 # ---- ratify: the keeper's word → the mover under every gate ----------------------------------------
-def ratify(vault, cfg, plan_path, frozen_live=True):
+def ratify(vault, cfg, plan_path, frozen_live=True, intake=False):
     """Snapshot, manifest, rehearsal (on record), the mover, a separate verify, the Acta, the registry."""
     import subprocess
     py, here = sys.executable, HERE
@@ -332,15 +394,22 @@ def ratify(vault, cfg, plan_path, frozen_live=True):
     expect = sorted(__import__("glob").glob(os.path.join(C.STATE, "expect-*.json")), key=os.path.getmtime)[-1]
     rc, out = run("cerebrum.py", "verify", "--before", before, "--expect", expect, *(["--frozen-live"] if frozen_live else []))
     steps.append(("verify, separately", out.splitlines()[0] if out else ""))
-    if rc: return {"ok": False, "steps": steps, "detail": out[-1500:]}
-    acta_entry(vault, cfg, plan_path, undo)
+    if rc:
+        if intake:                                   # an agreed placement that fails its verify undoes itself
+            rc2, out2 = run("cerebrum.py", "undo", "--log", undo, "--i-ratified")
+            steps.append(("undone", out2.splitlines()[-1] if out2 else ""))
+            log(f"auto-place\tRED → undone\t{undo}")
+        return {"ok": False, "steps": steps, "detail": out[-1500:]}
+    acta_entry(vault, cfg, plan_path, undo, intake=intake)
     rc, out = run("cerebrum.py", "registry", "--write"); steps.append(("registry", out.splitlines()[-1] if out else ""))
     log(f"ratify\t{plan_path}\tGREEN\t{undo}")
     ledger("intake", event="ratify", plan=plan_path, by="the keeper, on the page", undo=undo, expect=expect, verify="GREEN",
            ops=[l.split("\t")[1:] for l in open(undo, encoding="utf-8").read().splitlines() if l.split("\t")[1:2] not in (["plan-begin"], ["plan-end"], ["trashed-to"])])
     return {"ok": True, "steps": steps, "undo": undo}
 
-def acta_entry(vault, cfg, plan_path, undo):
+def acta_entry(vault, cfg, plan_path, undo, intake=False):
+    if not cfg.get("law"):                 # a vault without a law (a test fixture) has no Acta to write
+        return
     acta = os.path.join(vault, os.path.dirname(cfg["law"]), "ACTA CEREBRI.md")
     if not os.path.isfile(acta):
         return
@@ -350,7 +419,9 @@ def acta_entry(vault, cfg, plan_path, undo):
         if len(f) >= 2 and f[1] not in ("plan-begin", "plan-end", "trashed-to"):
             ops.append(f"> - `{f[1]}` " + " → ".join(f"`{x}`" for x in f[2:4]))
     with open(acta, "a", encoding="utf-8") as fh:
-        fh.write(f"\n## {datetime.now().strftime('%Y-%m-%d %H:%M')} — Placed by the Archivist, ratified by the keeper on the page\n"
+        head = ("Placed by the Archivist on the agreement of two readers — the keeper's standing word (2026-09-15)" if intake
+                else "Placed by the Archivist, ratified by the keeper on the page")
+        fh.write(f"\n## {datetime.now().strftime('%Y-%m-%d %H:%M')} — {head}\n"
                  f"Plan `{os.path.basename(plan_path)}`: shortlist, two local readers, the intake gate; snapshot, rehearsal on record, the mover, verify in a separate run — GREEN. Undo: `{os.path.basename(undo)}`.\n"
                  f"> [!note]- Operations ({len(ops)})\n" + "\n".join(ops) + "\n")
 
@@ -619,6 +690,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 def serve(port=PORT):
     Handler.port = port
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    if AUTO_PLACE:
+        threading.Thread(target=queue_worker, args=(Handler.vault, Handler.cfg), daemon=True).start()
     print(f"the Archivist : http://127.0.0.1:{port}/  — vault {Handler.vault}  — model {LLM_URL}")
     log(f"serve\t{port}\t{Handler.vault}")
     srv.serve_forever()
