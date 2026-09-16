@@ -65,7 +65,7 @@ module.exports = class ArchivistPlugin extends Plugin {
     const r = await this.api("/api/place", { note: c.note });
     if (r.placed && r.placed.ok) new Notice(`placed → ${r.placed_into} (verified; undo on the Archivist's page)`, 15000);
     else if (r.queued) new Notice(`agreed → ${r.placed_into}; it moves the moment you quit Obsidian`, 15000);
-    else if (r.placed) new Notice(`${c.note}: placement RED — undone, left in the inbox`, 20000);
+    else if (r.placed) { const st = (r.placed.steps || []); const undone = st.some(s => s[0] === "undone"); new Notice(`${c.note}: placement ${undone ? "RED — undone, left in the inbox" : "did not run — " + (st.length ? st[st.length - 1].join(": ") : "refused")}`, 20000); }
     else new Notice(`${c.note}: ${r.status}${r.why ? " — " + r.why : ""} — yours to decide on the Archivist's page`, 15000);
     this.openPage();
   }

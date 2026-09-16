@@ -1577,5 +1577,44 @@ try:
 finally:
     AR.QUEUE_DIR, AR.LOG = _rq, _rl
 
+
+print("== audit III (2026-09-15 evening): the queue never loops, the lexical channel ranks only what matched, headers with many blanks ==")
+import numpy as _np
+tmp31 = tempfile.mkdtemp(prefix="cerebrum-audit3-")
+_rq, _rl = AR.QUEUE_DIR, AR.LOG; AR.QUEUE_DIR = os.path.join(tmp31, "queue"); AR.LOG = os.path.join(tmp31, "archivist.log")
+_rs31 = C.STATE
+try:
+    v31, cfg31 = organ_vault(tmp31); C.STATE = os.path.join(tmp31, "state"); os.makedirs(C.STATE)
+    pl31 = os.path.join(tmp31, "intake-20260101-000001.tsv")
+    open(pl31, "w", encoding="utf-8").write("mv\t# INBOX/Mixed.md\t4 ARCHIVE/Mixed — original.md\npartition\t4 ARCHIVE/Mixed — original.md\t" + "0" * 64 + "\n")
+    AR.enqueue(pl31)
+    snaps_before = len(os.listdir(C.SNAPS)) if os.path.isdir(C.SNAPS) else 0
+    _rsn = C.SNAPS; C.SNAPS = os.path.join(tmp31, "snaps"); os.makedirs(C.SNAPS)
+    os.environ["CEREBRUM_SNAPSHOTS"] = C.SNAPS; os.environ["CEREBRUM_STATE"] = C.STATE
+    r1 = AR.drain_queue(v31, cfg31); r2 = AR.drain_queue(v31, cfg31)
+    logtxt = open(AR.LOG, encoding="utf-8").read()
+    check("a queued plan whose rehearsal fails is withdrawn ONCE with its reason on record, takes no snapshot, and is not retried",
+          r1 == [(pl31, False)] and r2 == [] and os.listdir(AR.QUEUE_DIR) == [] and "withdrawn: rehearsal" in logtxt and os.listdir(C.SNAPS) == []
+          and os.path.isfile(os.path.join(v31, "# INBOX", "Mixed.md")))
+    if r1 != [(pl31, False)] or os.listdir(C.SNAPS): print("      ", r1, os.listdir(C.SNAPS), logtxt[-300:])
+    os.environ.pop("CEREBRUM_SNAPSHOTS", None); os.environ.pop("CEREBRUM_STATE", None); C.SNAPS = _rsn
+    check("one placement at a time: ratify holds a lock", isinstance(AR.RATIFY_LOCK, type(__import__("threading").Lock())))
+    secs31 = [{"note": f"n{i}.md", "heading": "", "text": "plain words here"} for i in range(50)] + [{"note": "koinonia.md", "heading": "", "text": "KOINŌNIA and ΣΟΦΙΩΝ meet"}]
+    o1 = AR._lexical_order("what is KOINŌNIA?", secs31); o2 = AR._lexical_order("ΣΟΦΙΩΝ", secs31); o3 = AR._lexical_order("nothing matches xyzzy", secs31)
+    check("the lexical channel keeps Greek and macron letters and ranks ONLY sections that matched (silence is not a rank)",
+          list(o1) == [50] and list(o2) == [50] and len(o3) == 0)
+    v32, cfg32 = organ_vault(os.path.join(tmp31, "m2"))
+    FF = "# INBOX/Captured Idea.md"
+    open(os.path.join(v32, FF), "w", encoding="utf-8").write("---\ncaptured: 2026-09-15\n---\n\n\n\n## Idea\n\nthe hook of the song and its tempo, kept as one idea\n")
+    recs32 = [rec(v32, n) for n in SEM.scope(v32, cfg32) if n != FF] + [rec(v32, FF, "P000", dest="3 RESOURCES/Idea Stub.md"), rec(v32, FF, "P001", dest="3 RESOURCES/Songs.md")]
+    eff32, p32 = SEM.effective(v32, cfg32, recs32); ag32, ru32 = SEM.agree(v32, eff32, eff32)
+    plan32, _ = SEM.propose(v32, cfg32, ag32, ru32, today="2026-09-15")
+    check("a header followed by three blank lines, sent to a new note, composes nothing: all of it is LEFT",
+          p32 == [] and not any(l.startswith("compose\t3 RESOURCES/Idea Stub.md") for l in plan32) and any(l.startswith("leave\t") and "L1-L6" in l for l in plan32))
+    if any(l.startswith("compose") for l in plan32): print("      ", plan32)
+finally:
+    AR.QUEUE_DIR, AR.LOG, C.STATE = _rq, _rl, _rs31
+    os.environ.pop("CEREBRUM_SNAPSHOTS", None); os.environ.pop("CEREBRUM_STATE", None)
+
 print(f"RESULT: {'ALL PASS' if not fails else 'FAILURES: ' + ', '.join(fails)}")
 sys.exit(1 if fails else 0)

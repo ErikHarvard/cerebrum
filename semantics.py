@@ -1023,7 +1023,9 @@ def propose(vault, cfg, agreed, runs, today=None):
         if fm and len(set(place[rel].values())) > 1:
             fm_dests = {place[rel][l] for l in fm if l in place[rel]}
             if fm_dests and fm_dests != {rel}:
-                tail = [l for l in place[rel] if l not in fm and l not in nb[rel] and l - 1 in fm]   # the blank after it
+                tail, l = [], max(fm) + 1
+                while l in place[rel] and l not in nb[rel]:          # every blank after the header, however many
+                    tail.append(l); l += 1
                 for l in list(fm) + tail:
                     if l in place[rel] and place[rel][l] != rel:
                         place[rel][l] = LEAVE

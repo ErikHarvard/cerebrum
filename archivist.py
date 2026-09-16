@@ -299,7 +299,7 @@ def place_note(vault, cfg, note, url=None, say=lambda *_: None):
                                                               "A_why": d["a"].get("why", ""), "B_why": d["b"].get("why", "")} for d in r.get("disputes", [])])
     if r["status"] == "PLAN":
         os.makedirs(S.sema_dir(), exist_ok=True)
-        p = os.path.join(S.sema_dir(), f"intake-{C.ts()}.tsv")
+        p = C.fresh_path(os.path.join(S.sema_dir(), f"intake-{C.ts()}.tsv"))
         with open(p, "w", encoding="utf-8") as fh:
             fh.write(f"# the Archivist's intake plan for {note} — proposed, NOT ratified\n" + "".join(l + "\n" for l in r["plan"]))
         r["plan_path"] = p
@@ -358,12 +358,14 @@ def drain_queue(vault, cfg):
             os.remove(qp); log(f"auto-place\twithdrawn {q}\tthe note is gone: {src} — the keeper's hand")
             out.append((plan, False)); continue
         res = ratify(vault, cfg, plan, intake=True)
-        log(f"auto-place\tqueued {q}\t{'GREEN' if res.get('ok') else 'RED — left in the queue'}")
-        if res.get("ok") or any(s[0] == "undone" for s in res.get("steps", [])):
+        if res.get("ok"):
+            log(f"auto-place\tqueued {q}\tGREEN"); os.remove(qp)
+        else:                                        # withdrawn with its reason on record; the note stays in the inbox for the keeper
+            why = " · ".join(f"{s[0]}: {str(s[1])[:120]}" for s in res.get("steps", []))
+            log(f"auto-place\tqueued {q}\tRED — withdrawn: {why[:300]}")
+            ledger("intake", event="auto-place-red", plan=plan, steps=res.get("steps", []), detail=(res.get("detail") or "")[:600])
             os.remove(qp)
         out.append((plan, bool(res.get("ok"))))
-        if not res.get("ok"):
-            break
     return out
 
 def queue_worker(vault, cfg, every=15):
@@ -380,8 +382,15 @@ def queue_worker(vault, cfg, every=15):
             log(f"error\tqueue\t{e!r}")
 
 # ---- ratify: the keeper's word → the mover under every gate ----------------------------------------
+RATIFY_LOCK = threading.Lock()      # one run on the vault at a time: the page, a handler and the queue worker share the mover (2026-09-15)
+
 def ratify(vault, cfg, plan_path, frozen_live=True, intake=False):
-    """Snapshot, manifest, rehearsal (on record), the mover, a separate verify, the Acta, the registry."""
+    """Rehearsal first (it moves nothing), then snapshot, manifest, the mover, a separate verify, the Acta, the registry.
+    Serialised: two runs at once would read each other's moves as unratified."""
+    with RATIFY_LOCK:
+        return _ratify(vault, cfg, plan_path, frozen_live, intake)
+
+def _ratify(vault, cfg, plan_path, frozen_live, intake):
     import subprocess
     py, here = sys.executable, HERE
     env = dict(os.environ, VAULT=vault)
@@ -391,26 +400,29 @@ def ratify(vault, cfg, plan_path, frozen_live=True, intake=False):
     steps = []
     if C._is_real(vault) and C._obsidian_running():
         return {"ok": False, "steps": [("Obsidian", "refused — close Obsidian first")]}
+    rc, out = run("rehearse.py", "--plan", plan_path, "--no-snapshot", *(["--frozen-live"] if frozen_live else []))
+    steps.append(("rehearsal", [l for l in out.splitlines() if l.startswith("rehearse : ")][-1] if out else ""))
+    if rc: return {"ok": False, "steps": steps, "detail": out[-1500:]}
     rc, out = run("cerebrum.py", "snapshot"); steps.append(("snapshot", out.splitlines()[-1] if out else ""))
     if rc: return {"ok": False, "steps": steps}
     rc, out = run("cerebrum.py", "manifest"); steps.append(("manifest", out.splitlines()[-1] if out else ""))
     if rc: return {"ok": False, "steps": steps}
     before = sorted(__import__("glob").glob(os.path.join(C.STATE, "manifest-*.tsv")), key=os.path.getmtime)[-1]
-    rc, out = run("rehearse.py", "--plan", plan_path, "--no-snapshot", *(["--frozen-live"] if frozen_live else []))
-    steps.append(("rehearsal", [l for l in out.splitlines() if l.startswith("rehearse : ")][-1] if out else ""))
-    if rc: return {"ok": False, "steps": steps, "detail": out[-1500:]}
     rc, out = run("cerebrum.py", "move", "--plan", plan_path, "--before", before, "--apply", "--i-ratified", *(["--frozen-live"] if frozen_live else []))
     steps.append(("the mover", [l for l in out.splitlines() if l.startswith("move")][-1] if out else ""))
-    if rc: return {"ok": False, "steps": steps, "detail": out[-1500:]}
+    if rc:
+        if intake:
+            undos = [u for u in __import__("glob").glob(os.path.join(C.STATE, "undo-*.tsv")) if os.path.getmtime(u) >= os.path.getmtime(before)]
+            if undos:                                # the mover acted before it went red: reverse what it did
+                _auto_undo(run, steps, max(undos, key=os.path.getmtime))
+        return {"ok": False, "steps": steps, "detail": out[-1500:]}
     undo = sorted(__import__("glob").glob(os.path.join(C.STATE, "undo-*.tsv")), key=os.path.getmtime)[-1]
     expect = sorted(__import__("glob").glob(os.path.join(C.STATE, "expect-*.json")), key=os.path.getmtime)[-1]
     rc, out = run("cerebrum.py", "verify", "--before", before, "--expect", expect, *(["--frozen-live"] if frozen_live else []))
     steps.append(("verify, separately", out.splitlines()[0] if out else ""))
     if rc:
         if intake:                                   # an agreed placement that fails its verify undoes itself
-            rc2, out2 = run("cerebrum.py", "undo", "--log", undo, "--i-ratified")
-            steps.append(("undone", out2.splitlines()[-1] if out2 else ""))
-            log(f"auto-place\tRED → undone\t{undo}")
+            _auto_undo(run, steps, undo)
         return {"ok": False, "steps": steps, "detail": out[-1500:]}
     acta_entry(vault, cfg, plan_path, undo, intake=intake)
     rc, out = run("cerebrum.py", "registry", "--write"); steps.append(("registry", out.splitlines()[-1] if out else ""))
@@ -418,6 +430,14 @@ def ratify(vault, cfg, plan_path, frozen_live=True, intake=False):
     ledger("intake", event="ratify", plan=plan_path, by="the keeper, on the page", undo=undo, expect=expect, verify="GREEN",
            ops=[l.split("\t")[1:] for l in open(undo, encoding="utf-8").read().splitlines() if l.split("\t")[1:2] not in (["plan-begin"], ["plan-end"], ["trashed-to"])])
     return {"ok": True, "steps": steps, "undo": undo}
+
+def _auto_undo(run, steps, undo):
+    rc2, out2 = run("cerebrum.py", "undo", "--log", undo, "--i-ratified")
+    last = out2.splitlines()[-1] if out2 else ""
+    if rc2 == 0 and "verified" in out2:
+        steps.append(("undone", last)); log(f"auto-place\tRED → undone\t{undo}")
+    else:                                            # refused (Obsidian reopened) or itself red: say so, never call it undone
+        steps.append(("undo NOT done", last)); log(f"auto-place\tRED and the undo did not complete: {last[:160]}\t{undo}")
 
 def acta_entry(vault, cfg, plan_path, undo, intake=False):
     if not cfg.get("law"):                 # a vault without a law (a test fixture) has no Acta to write
@@ -444,7 +464,8 @@ def _lexical_order(question, secs):
     by words it ranked first. Names and coinages are what this vault is made of."""
     import math
     import numpy as np
-    tok = lambda t: re.findall(r"[a-z0-9]+", t.lower())
+    import unicodedata
+    tok = lambda t: re.findall(r"\w+", unicodedata.normalize("NFC", t).lower())     # every letter, not only ASCII (KOINŌNIA, ΣΟΦΙΩΝ)
     docs = [tok(f"{os.path.splitext(os.path.basename(x['note']))[0]} {x['heading']} {x['text']}") for x in secs]
     n = len(docs)
     if n == 0:
@@ -466,7 +487,8 @@ def _lexical_order(question, secs):
         for w in q:
             if w in c:
                 sc[i] += math.log(1 + (n - df[w] + 0.5) / (df[w] + 0.5)) * c[w] * 2.2 / (c[w] + norm)
-    return np.argsort(-sc, kind="stable")
+    order = np.argsort(-sc, kind="stable")
+    return order[sc[order] > 0]                    # only sections that matched a word are ranked; silence is not a rank
 
 def _fuse(orders, n, depth=200, k=60):
     """Reciprocal-rank fusion: a section ranked early by either channel comes early in the fused order."""
@@ -645,7 +667,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0"); self.end_headers()
     def _json(self, obj, code=200):
         b = json.dumps(obj, ensure_ascii=False, default=str).encode()
-        self.send_response(code); self._cors(); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+        try:
+            self.send_response(code); self._cors(); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+        except (BrokenPipeError, ConnectionResetError):     # the client left mid-request (a killed placement client, 2026-09-15): the work stands, the reply cannot
+            log(f"client gone\t{self.path}\tthe reply could not be sent")
     def log_message(self, *a): pass
     def do_GET(self):
         if self.path == "/api/status":
