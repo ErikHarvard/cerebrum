@@ -330,6 +330,14 @@ def _plan_destination(plan_lines):
             return f[2]
     return ""
 
+def _plan_source(plan_path):
+    """The inbox note a plan starts from: its first mv's source (an intake plan always begins by archiving the capture)."""
+    for l in open(plan_path, encoding="utf-8"):
+        f = l.rstrip("\n").split("\t")
+        if f[0] == "mv" and len(f) > 1:
+            return f[1]
+    return ""
+
 def enqueue(plan_path):
     os.makedirs(QUEUE_DIR, exist_ok=True)
     with open(os.path.join(QUEUE_DIR, os.path.basename(plan_path)), "w", encoding="utf-8") as fh:
@@ -345,6 +353,10 @@ def drain_queue(vault, cfg):
         qp = os.path.join(QUEUE_DIR, q); plan = open(qp, encoding="utf-8").read().strip()
         if not os.path.isfile(plan):
             os.remove(qp); continue
+        src = _plan_source(plan)
+        if src and not os.path.isfile(os.path.join(vault, src)):     # the keeper removed or moved the note himself (2026-09-15)
+            os.remove(qp); log(f"auto-place\twithdrawn {q}\tthe note is gone: {src} — the keeper's hand")
+            out.append((plan, False)); continue
         res = ratify(vault, cfg, plan, intake=True)
         log(f"auto-place\tqueued {q}\t{'GREEN' if res.get('ok') else 'RED — left in the queue'}")
         if res.get("ok") or any(s[0] == "undone" for s in res.get("steps", [])):

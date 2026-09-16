@@ -1561,5 +1561,21 @@ eff29b, _ = SEM.effective(v29, cfg29, recs29b); agreed29b, runs29b = SEM.agree(v
 plan29b, _ = SEM.propose(v29, cfg29, agreed29b, runs29b, today="2026-09-15")
 check("… while a note that moves WHOLE keeps its header (a plain mv)", any(l == f"mv\t{FF}\t3 RESOURCES/Captured Idea.md" for l in plan29b))
 
+
+print("== the queue withdraws a plan whose note the keeper removed (2026-09-15) ==")
+tmp30 = tempfile.mkdtemp(prefix="cerebrum-queue-")
+_rq, _rl = AR.QUEUE_DIR, AR.LOG; AR.QUEUE_DIR = os.path.join(tmp30, "queue"); AR.LOG = os.path.join(tmp30, "archivist.log")
+try:
+    v30, cfg30 = organ_vault(tmp30)
+    pl30 = os.path.join(tmp30, "intake-20260101-000000.tsv")
+    open(pl30, "w", encoding="utf-8").write("mv\t# INBOX/Gone.md\t4 ARCHIVE/Gone — original.md\n")
+    AR.enqueue(pl30)
+    res30 = AR.drain_queue(v30, cfg30)
+    check("a queued plan whose source note no longer exists is withdrawn once, never retried, and nothing runs",
+          res30 == [(pl30, False)] and os.listdir(AR.QUEUE_DIR) == [] and "withdrawn" in open(AR.LOG, encoding="utf-8").read()
+          and not os.path.exists(os.path.join(v30, "4 ARCHIVE", "Gone — original.md")))
+finally:
+    AR.QUEUE_DIR, AR.LOG = _rq, _rl
+
 print(f"RESULT: {'ALL PASS' if not fails else 'FAILURES: ' + ', '.join(fails)}")
 sys.exit(1 if fails else 0)
