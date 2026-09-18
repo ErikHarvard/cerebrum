@@ -10,7 +10,7 @@ He stores and retrieves by meaning, through the organ, never past it:
 The model is whatever OpenAI-compatible server the config names (llama-server by default). Nothing here
 moves a file: the mover does, under every gate the law gives it. Nothing here deletes.
 """
-import os, sys, json, re, time, hashlib, threading, urllib.request, http.server
+import os, sys, json, re, time, hashlib, threading, subprocess, urllib.request, http.server
 from datetime import datetime
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import cerebrum as C, semantics as S, checks as K
@@ -24,6 +24,7 @@ ANSWERS = os.path.join(C.STATE, "answers")
 CACHE_PATH = None                                        # the embeddings cache; None = the organ's own (state/sema)
 AUTO_PLACE = bool(CFG.get("auto_place", True))           # 2026-09-15, the keeper: an agreed placement moves itself; the inbox is a doorway, not a heap
 QUEUE_DIR = os.path.join(C.STATE, "queue")               # agreed plans waiting for Obsidian to close
+LLM_UNIT = CFG.get("llm_unit", "archivist-llm.service")  # 2026-09-17, the keeper: the model runs only when he turns it on (the page's switch)
 
 def _obsidian_open(vault):
     return C._is_real(vault) and C._obsidian_running()
@@ -91,6 +92,24 @@ def model_reachable():
         urllib.request.urlopen(LLM_URL.rstrip("/") + "/v1/models", timeout=5); return True
     except Exception:
         return False
+
+def model_unit_state():
+    """The model server's systemd user unit: active, activating, inactive, failed — or unknown if systemctl cannot say."""
+    try:
+        return subprocess.run(["systemctl", "--user", "is-active", LLM_UNIT], capture_output=True, text=True, timeout=10).stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+def switch_model(on):
+    """The keeper's switch: start or stop the model server. Off by default; it holds ~9 GB of memory while it runs."""
+    act = "start" if on else "stop"
+    try:
+        r = subprocess.run(["systemctl", "--user", act, LLM_UNIT], capture_output=True, text=True, timeout=60)
+        err = r.stderr.strip() if r.returncode else ""
+    except Exception as e:
+        err = repr(e)
+    log(f"model\t{act}\t{LLM_UNIT}\t{err[:200] or 'ok'}")
+    return {"ok": not err, "state": model_unit_state(), "error": err[:300] or None}
 
 # ---- polish: a raw thought made fit for the vault, with the raw kept verbatim beneath -----------------
 POLISH = """You are the Archivist's editor. Rewrite the keeper's raw note into clean, professional Markdown for a personal knowledge vault:
@@ -606,8 +625,9 @@ h1{font-weight:600;margin:0 0 4px}small{color:#6b6760}textarea,input{width:100%;
 textarea{min-height:160px}button{font:inherit;padding:8px 14px;border-radius:6px;border:1px solid #8a8378;background:#fff;cursor:pointer;margin:6px 6px 0 0}
 button.primary{background:#2f4f3e;color:#fff;border-color:#2f4f3e}section{border-top:1px solid #e3ded4;padding:18px 0}
 pre{white-space:pre-wrap;background:#fff;border:1px solid #e3ded4;border-radius:6px;padding:10px;max-height:420px;overflow:auto}
-.ok{color:#2f6f3e}.bad{color:#9b2c2c}.muted{color:#6b6760}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:4px 6px;border-bottom:1px solid #eee;font-size:14px}</style>
+.ok{color:#2f6f3e}#modelbar button{margin:0 0 0 8px}.bad{color:#9b2c2c}.muted{color:#6b6760}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:4px 6px;border-bottom:1px solid #eee;font-size:14px}</style>
 <h1>The Archivist</h1><small id="status">…</small>
+<p id="modelbar" class="muted">model …</p>
 <section><h2>Store</h2><p class="muted">Paste what belongs in the vault. It is captured to the inbox as a note; then the organ reads it — the shortlist, two readers, the gate — and proposes. Nothing moves until you ratify.</p>
 <input id="title" placeholder="Title (if empty, the first words of the text)"><textarea id="text" placeholder="The text — raw is fine; the Archivist polishes it if the box is ticked, and keeps your raw words beneath"></textarea><input id="source" placeholder="Source (optional): who wrote it, where it came from">
 <label><input type="checkbox" id="polish" checked> Polish before storing — spelling, grammar, structure; no new claims; the raw capture kept verbatim in a folded block</label><br>
@@ -620,18 +640,26 @@ pre{white-space:pre-wrap;background:#fff;border:1px solid #e3ded4;border-radius:
 <script>
 const $=id=>document.getElementById(id);let lastMd="",lastPlan="";
 async function api(path,body){const r=await fetch(path,{method:body?"POST":"GET",headers:{"Content-Type":"application/json"},body:body?JSON.stringify(body):undefined});return r.json();}
-async function status(){const s=await api("/api/status");$("status").textContent=`vault ${s.vault} · check ${s.check} · inbox ${s.inbox} · model ${s.model?"reachable":"NOT reachable"} · Obsidian ${s.obsidian?"open (ratify refused while open)":"closed"}`;$("log").textContent=s.log.join("\n")||"—";}
+let modelOn=false,polling=null;
+async function status(){const s=await api("/api/status");$("status").textContent=`vault ${s.vault} · check ${s.check} · inbox ${s.inbox} · Obsidian ${s.obsidian?"open (ratify refused while open)":"closed"}`;$("log").textContent=s.log.join("\n")||"—";modelBar(s);}
+function modelBar(s){modelOn=!!s.model;const up=s.model_unit==="active"||s.model_unit==="activating";
+if(s.model){$("modelbar").innerHTML=`<span class="ok">Model: ON</span> — using about 9 GB of memory<button onclick="setModel(false)">Turn the model off</button>`;}
+else if(up){$("modelbar").innerHTML=`<span class="muted">Model: loading… (a few seconds, up to a minute after a reboot)</span><button onclick="setModel(false)">Cancel</button>`;}
+else{$("modelbar").innerHTML=`<span class="bad">Model: OFF</span>${s.model_unit==="failed"?" (it failed to start; see the log)":""}<button class="primary" onclick="setModel(true)">Turn the model on</button>`;}
+if(up&&!s.model){if(!polling)polling=setInterval(status,3000);}else if(polling){clearInterval(polling);polling=null;}}
+async function setModel(on){$("modelbar").innerHTML=`<span class="muted">${on?"starting":"stopping"}…</span>`;const r=await api("/api/model",{on});if(!r.ok)alert("Could not "+(on?"start":"stop")+" the model: "+(r.error||"unknown"));status();}
+function needModel(out){if(modelOn)return true;$(out).textContent="The model is off. Press “Turn the model on” at the top, wait until it says ON, then try again.";return false;}
 function show(r){let t=`${r.status}${r.why?" — "+r.why:""}\n`;if(r.problems)t+=r.problems.map(p=>"! "+p).join("\n")+"\n";if(r.must_read)t+="must read: "+r.must_read.join(", ")+"\n";
 if(r.shortlist&&r.shortlist.notes)t+="\nshortlist:\n"+r.shortlist.notes.slice(0,6).map((n,i)=>`  ${i+1}. ${n.sim}  ${n.note}`).join("\n")+"\n";
 if(r.readers){for(const w of["A","B"]){t+=`\nreader ${w}:\n`+ (r.readers[w]||[]).map(x=>`  ${x.lines} ${x.op} → ${x.dest||"(stays)"}${x.at?" "+x.at:""} — ${x.why}`).join("\n")+"\n";}}
 if(r.disputes)t+="\ndisputes: "+r.disputes.map(d=>`L${d.first}–L${d.last}`).join(", ")+"\n";if(r.plan)t+="\nplan:\n  "+r.plan.join("\n  ")+"\n";$("storeOut").textContent=t;
 $("ratify").innerHTML=r.status==="PLAN"?`<button class="primary" onclick="doRatify()">Ratify — run this plan on the vault</button> <span class="muted">snapshot · rehearsal · the mover · verify · the Acta</span>`:"";lastPlan=r.plan_path||"";}
-async function store(){$("storeOut").textContent="capturing…";const c=await api("/api/capture",{title:$("title").value||$("text").value.trim().split(/\s+/).slice(0,8).join(" "),text:$("text").value,source:$("source").value,polish:$("polish").checked});if(c.error){$("storeOut").textContent="! "+c.error;return;}
+async function store(){if(!needModel("storeOut"))return;$("storeOut").textContent="capturing…";const c=await api("/api/capture",{title:$("title").value||$("text").value.trim().split(/\s+/).slice(0,8).join(" "),text:$("text").value,source:$("source").value,polish:$("polish").checked});if(c.error){$("storeOut").textContent="! "+c.error;return;}
 $("storeOut").textContent=`captured → ${c.note}\nreading (shortlist, two readers, the gate)… this takes a minute or two on the local model`;show(await api("/api/place",{note:c.note}));status();}
-async function polishExisting(){const n=prompt("Inbox note path, e.g. # INBOX/Captured.md");if(!n)return;$("storeOut").textContent="polishing…";const r=await api("/api/polish",{note:n});$("storeOut").textContent=r.error?"! "+r.error:`polished ${r.note} (raw kept beneath) — now place it`;}
-async function placeExisting(){const n=prompt("Inbox note path, e.g. # INBOX/Something.md");if(!n)return;$("storeOut").textContent="reading…";show(await api("/api/place",{note:n}));}
+async function polishExisting(){if(!needModel("storeOut"))return;const n=prompt("Inbox note path, e.g. # INBOX/Captured.md");if(!n)return;$("storeOut").textContent="polishing…";const r=await api("/api/polish",{note:n});$("storeOut").textContent=r.error?"! "+r.error:`polished ${r.note} (raw kept beneath) — now place it`;}
+async function placeExisting(){if(!needModel("storeOut"))return;const n=prompt("Inbox note path, e.g. # INBOX/Something.md");if(!n)return;$("storeOut").textContent="reading…";show(await api("/api/place",{note:n}));}
 async function doRatify(){if(!lastPlan)return;$("ratify").innerHTML="running…";const r=await api("/api/ratify",{plan:lastPlan});$("ratify").innerHTML=`<span class="${r.ok?"ok":"bad"}">${r.ok?"GREEN — placed and verified":"REFUSED / RED"}</span><pre>${r.steps.map(s=>s.join(": ")).join("\n")}${r.detail?"\n"+r.detail:""}</pre>`;status();}
-async function askQ(){$("askOut").textContent="retrieving and answering…";const r=await api("/api/ask",{q:$("q").value});lastMd=r.markdown||"";$("askOut").textContent=(r.markdown||("! "+r.error))+(r.path?`\n\n(saved: ${r.path})`:"");}
+async function askQ(){if(!needModel("askOut"))return;$("askOut").textContent="retrieving and answering…";const r=await api("/api/ask",{q:$("q").value});lastMd=r.markdown||"";$("askOut").textContent=(r.markdown||("! "+r.error))+(r.path?`\n\n(saved: ${r.path})`:"");}
 function copyAns(){if(lastMd)navigator.clipboard.writeText(lastMd);}status();</script>"""
 
 _status_cache = {"when": 0.0, "ok": None}
@@ -673,6 +701,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             log(f"client gone\t{self.path}\tthe reply could not be sent")
     def log_message(self, *a): pass
     def do_GET(self):
+        if self.path == "/api/model":                       # the switch's own state — no vault check, cheap enough to poll
+            return self._json({"model": model_reachable(), "model_unit": model_unit_state()})
         if self.path == "/api/status":
             v = K.Vault(self.vault, self.cfg)
             inbox = len([p for p in v.movable if p.startswith(list(self.cfg.get("para", C.PARA))[0] + "/") and p.endswith(".md")])
@@ -682,7 +712,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 _status_cache.update(when=now, ok=K.run(self.vault, self.cfg, say=lambda *_: None))
             ok = _status_cache["ok"]
             return self._json({"vault": os.path.basename(self.vault), "check": "GREEN" if ok else "RED", "inbox": inbox,
-                               "model": model_reachable(), "obsidian": C._obsidian_running(), "log": tail})
+                               "model": model_reachable(), "model_unit": model_unit_state(), "obsidian": C._obsidian_running(), "log": tail})
         b = PAGE.encode(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def do_POST(self):
         if not self._origin_ok():
@@ -696,6 +726,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except (ValueError, TypeError) as e:
             return self._json({"error": f"bad request: {e}"}, 400)
         try:
+            if self.path == "/api/model":
+                return self._json(switch_model(bool(body.get("on"))))
             if self.path == "/api/capture":
                 if not (body.get("text") or "").strip():
                     return self._json({"error": "nothing to capture"}, 400)

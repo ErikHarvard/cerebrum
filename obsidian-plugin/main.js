@@ -23,6 +23,7 @@ class AskModal extends Modal {
     const ta = contentEl.createEl("textarea", { attr: { style: "width:100%;min-height:80px" } }); ta.value = this.seed;
     const out = contentEl.createEl("pre", { attr: { style: "white-space:pre-wrap;max-height:50vh;overflow:auto" } });
     new Setting(contentEl).addButton(b => b.setButtonText("Ask").setCta().onClick(async () => {
+      if (!(await this.plugin.needModel())) { out.setText("The model is off. Turn it on from the status bar, then ask again."); return; }
       out.setText("retrieving and answering…");
       const r = await this.plugin.api("/api/ask", { q: ta.value });
       out.setText(r.markdown || ("! " + r.error)); this.last = r.markdown || "";
@@ -46,6 +47,13 @@ module.exports = class ArchivistPlugin extends Plugin {
       this.capture(f.basename, await this.app.vault.read(f), f.path);
     }});
     this.addCommand({ id: "ask", name: "Ask the Archivist", editorCallback: (ed) => new AskModal(this.app, this, ed.getSelection()).open() });
+    // the model switch (2026-09-17, the keeper: the model runs only when he turns it on) — the status bar shows it; a click flips it
+    this.statusEl = this.addStatusBarItem(); this.statusEl.addClass("mod-clickable"); this.modelState = "off";
+    this.statusEl.onClickEvent(() => this.modelState === "down" ? this.refreshModel(true) : this.setModel(this.modelState === "off"));
+    this.addCommand({ id: "model-on", name: "Turn the Archivist's model on", callback: () => this.setModel(true) });
+    this.addCommand({ id: "model-off", name: "Turn the Archivist's model off", callback: () => this.setModel(false) });
+    this.app.workspace.onLayoutReady(() => this.refreshModel());
+    this.registerInterval(window.setInterval(() => this.refreshModel(), 30000));
     this.addSettingTab(new (class extends PluginSettingTab {
       constructor(app, plugin) { super(app, plugin); this.plugin = plugin; }
       display() { const c = this.containerEl; c.empty();
@@ -57,7 +65,33 @@ module.exports = class ArchivistPlugin extends Plugin {
     const r = await fetch(this.settings.url + path, { method: body ? "POST" : "GET", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
     return r.json();
   }
+  async refreshModel(tell) {
+    let s; try { s = await this.api("/api/model"); } catch (e) { s = { down: true }; }
+    const up = s.model_unit === "active" || s.model_unit === "activating";
+    const was = this.modelState; this.modelState = s.down ? "down" : s.model ? "on" : up ? "loading" : "off";
+    this.statusEl.setText({ down: "Archivist: not running", on: "Archivist model: ON", loading: "Archivist model: loading…", off: "Archivist model: OFF" }[this.modelState]);
+    this.statusEl.setAttr("aria-label", { down: "The Archivist's service is not running", on: "Click to turn the model off (frees about 9 GB of memory)", loading: "Loading. Click to cancel.", off: "Click to turn the model on" }[this.modelState]);
+    if (this.modelState === "loading" && !this.fastPoll) this.fastPoll = window.setInterval(() => this.refreshModel(), 3000);
+    if (this.modelState !== "loading" && this.fastPoll) { window.clearInterval(this.fastPoll); this.fastPoll = null; }
+    if (was === "loading" && this.modelState === "on") new Notice("The Archivist's model is ON");
+    if (was === "loading" && this.modelState === "off") new Notice("The Archivist's model did not start; see the Archivist's page for its log", 10000);
+    if (tell && this.modelState === "down") new Notice("The Archivist's service is not running (systemctl --user start archivist.service)", 10000);
+    return s;
+  }
+  async setModel(on) {
+    this.statusEl.setText(on ? "Archivist model: starting…" : "Archivist model: stopping…");
+    let r; try { r = await this.api("/api/model", { on }); } catch (e) { r = { ok: false, error: "the Archivist's service is not running" }; }
+    if (!r.ok) new Notice(`Could not ${on ? "start" : "stop"} the model: ${r.error || "unknown"}`, 10000);
+    else if (!on) new Notice("The Archivist's model is OFF");
+    return this.refreshModel();
+  }
+  async needModel() {
+    const s = await this.refreshModel(); if (s.model) return true;
+    new Notice(s.down ? "The Archivist's service is not running." : "The Archivist's model is off. Click “Archivist model: OFF” in the status bar, wait for ON, then try again.", 10000);
+    return false;
+  }
   async capture(title, text, source) {
+    if (!(await this.needModel())) return;
     new Notice("capturing to the inbox…");
     const c = await this.api("/api/capture", { title, text, source: source ? `Obsidian: ${source}` : "Obsidian", polish: this.settings.polish !== false });
     if (c.error) { new Notice("! " + c.error); return; }
@@ -74,5 +108,5 @@ module.exports = class ArchivistPlugin extends Plugin {
     const leaf = leaves.length ? leaves[0] : this.app.workspace.getLeaf("split", "vertical");
     await leaf.setViewState({ type: VIEW, active: true }); this.app.workspace.revealLeaf(leaf);
   }
-  onunload() { this.app.workspace.detachLeavesOfType(VIEW); }
+  onunload() { if (this.fastPoll) window.clearInterval(this.fastPoll); this.app.workspace.detachLeavesOfType(VIEW); }
 };
