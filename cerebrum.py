@@ -792,14 +792,19 @@ def simulate(vault, ops, before_rows):
                 if not m or not 0 <= int(m.group(1)) <= n_dst:
                     errors.append(f"line {n}: insert after must be L0…L{n_dst} of {dst}, not {args[1]!r}"); continue
                 block = provenance("insert", src, sp) + piece
-                data, start, _ = _insert_bytes(old_b, int(m.group(1)), block)
+                data, start, grown = _insert_bytes(old_b, int(m.group(1)), block)
+                head_b = b"".join(old_b.splitlines(keepends=True)[:int(m.group(1))])
+                lead = (1 if head_b and not head_b.endswith(b"\n") else 0) + (1 if head_b else 0)   # L0 has no blank before it (audit IV)
+                for k, (d_, o_, l_) in list(contained.items()):    # pieces already recorded in this note after the insert point move down
+                    if d_ == dst and o_ >= start:
+                        contained[k] = [d_, o_ + grown, l_]
             else:
                 if dst not in files or not dst.endswith(".md"):
                     errors.append(f"line {n}: extend needs an existing note: {dst}"); continue
                 old_b = content(dst)
                 data = old_b + (b"\n" if old_b.endswith(b"\n") else b"\n\n") + provenance("extend", src, sp) + piece
             if op == "insert":
-                base, off = start + 1 + len(provenance("insert", src, sp)), 0
+                base, off = start + lead + len(provenance("insert", src, sp)), 0
             else:
                 base, off = len(data) - len(piece), 0
             for a, b in sp:

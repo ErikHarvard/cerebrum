@@ -1061,6 +1061,18 @@ try:
     e_tc = C.simulate(v, write_plan(os.path.join(tmp20, "tc.tsv"), ["trash\t3 RESOURCES/Twin.md", "compose\t3 RESOURCES/Twin.md\t# INBOX/Two.md\tP001"]), manifest(v))[0]
     check("a compose at a path the same plan trashed is refused by the dry run (it could never verify GREEN — audit IV)", any("trashed" in e for e in e_tc))
     os.remove(os.path.join(v, "3 RESOURCES", "Twin.md"))
+    # audit IV (2026-10-20): the recorded place of each piece was off by one at L0, and stale after a later insert into the same note
+    two_b = open(os.path.join(v, "# INBOX", "Two.md"), "rb").read(); seg2 = SEM.segment(two_b)
+    p0, p1 = SEM.take(two_b, SEM.spans("P000", seg2)), SEM.take(two_b, SEM.spans("P001", seg2))
+    plan_c = ["compose\t3 RESOURCES/Made.md\t# INBOX/Two.md\tP000", "insert\t3 RESOURCES/Made.md\tL0\t# INBOX/Two.md\tP001"]
+    bc = manifest(v); ops_c = write_plan(os.path.join(tmp20, "ct.tsv"), plan_c); ec, xc, _ = C.simulate(v, ops_c, bc)
+    okc, _, _ = C.apply_plan(v, ops_c, bc, C._scratch_trash_fn(os.path.join(tmp20, "_tc")), os.path.join(tmp20, "ct-u.tsv"))
+    def _slice(k):
+        d_, o_, l_ = xc["contained"][k]; return open(os.path.join(v, d_), "rb").read()[o_:o_ + l_]
+    ks = sorted(xc["contained"])
+    check("every piece's recorded place holds that piece: after an insert at L0, and after a later insert into the same note",
+          ec == [] and okc and len(ks) == 2 and [_slice(k) for k in ks] == [p0, p1])
+    C.undo_plan(v, os.path.join(tmp20, "ct-u.tsv"))
     check("insert into a note that does not exist is refused",
           C.simulate(v, write_plan(os.path.join(tmp20, "r.tsv"), ["insert\t3 RESOURCES/Nope.md\tL1\t# INBOX/Two.md\tP001"]), manifest(v))[0] != [])
     # the reading side: `at` names the section; agreement; the plan says insert
