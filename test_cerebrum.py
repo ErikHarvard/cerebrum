@@ -1207,6 +1207,13 @@ try:
     check("… and reports RED (rc 1) when the vault after undo differs from that manifest", rc2 == 1)
     check("… and its Acta entry says NOT verified — the record is written after the verify, never before (audit IV)",
           "NOT verified" in acta26 and "verified against the manifest it was planned against" not in acta26)
+    import contextlib as _cl, io as _io
+    with _cl.redirect_stdout(_io.StringIO()):
+        C.cmd_manifest(None); open(os.path.join(v, "3 RESOURCES", "Later.md"), "w").write("later\n"); C.cmd_manifest(None)
+    import glob as _gl; mans = sorted(_gl.glob(os.path.join(tmp26, "manifest-2*.tsv")), key=os.path.getmtime)
+    check("two manifests in one second are two files, the first not overwritten (audit IV)",
+          len(mans) >= 2 and "Later.md" not in open(mans[-2]).read() and "Later.md" in open(mans[-1]).read())
+    os.remove(os.path.join(v, "3 RESOURCES", "Later.md"))
     # audit IV (2026-10-20): the same undo run twice crashed on a note the first run had already removed
     open(os.path.join(v, "3 RESOURCES", "Src.md"), "w").write("# A\n\none\n\n# B\n\ntwo\n")
     b27 = manifest(v); u27 = os.path.join(tmp26, "u27.tsv")
@@ -1242,6 +1249,11 @@ try:
           and open(os.path.join(v, rel), encoding="utf-8").read().startswith("---\ncaptured: "))
     rel2 = AR.capture(v, ocfg, "A / new: verse?", "again")
     check("a second capture with the same title never clobbers", rel2 != rel and rel2.endswith(" 2.md") and os.path.isfile(os.path.join(v, rel2)) and os.path.isfile(os.path.join(v, rel)))
+    long_cjk = "日本語の歌詞" * 30
+    rel_cjk = AR.capture(v, ocfg, long_cjk, "a verse")
+    check("a long title in a script without spaces still captures, and its archived name fits in 255 bytes (audit IV)",
+          os.path.isfile(os.path.join(v, rel_cjk)) and len((os.path.splitext(os.path.basename(rel_cjk))[0] + " — original (2026-10-20) 9.md").encode()) <= 255)
+    os.remove(os.path.join(v, rel_cjk))
     check("records are parsed from JSON lines, fences and prose ignored",
           [r["op"] for r in AR.parse_records('Here:\n```json\n{"lines": "*", "op": "keep", "dest": ""}\n```\nnot json {')] == ["keep"])
     canned = {rel: '{"lines": "*", "op": "keep", "dest": "3 RESOURCES/Songs.md", "at": "after P000", "subject": "a verse", "use": "resource: songs", "why": "same songs"}',
@@ -1255,6 +1267,10 @@ try:
     AR.llm = fake_llm
     try:
         recs, probs, _ = AR.local_read(v, ocfg, rel, {"notes": [{"note": "3 RESOURCES/Songs.md", "sim": 0.9, "section": {"pid": "P000", "heading": "Songwriting"}}]}, {"trials": 4, "same_folder_top1": 2}, "A")
+        canned[rel] = canned[rel].replace('"at": "after P000"', '"at": null, "relation": null')
+        recs_n, probs_n, _ = AR.local_read(v, ocfg, rel, {"notes": []}, {"trials": 4, "same_folder_top1": 2}, "A")
+        check("a reader that writes null for relation or at is read as if it left them out (audit IV)", probs_n == [] and recs_n and recs_n[0]["relation"] == "")
+        canned[rel] = canned[rel].replace('"at": null, "relation": null', '"at": "after P000"')
         check("a local reader's records get the note and its hash filled in and validate clean", probs == [] and recs and recs[0]["note_sha"] == C.sha256(os.path.join(v, rel)))
         os.environ["CEREBRUM_EMBED"] = "fake"
         import importlib; importlib.reload(SEM); AR.S = SEM; AR.CACHE_PATH = os.path.join(tmp22, "emb.json")

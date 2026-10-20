@@ -554,7 +554,7 @@ def cmd_place(V, cfg, argv):
             json.dump(cal, fh, indent=1)
     print(f"measured : same-folder top-1 {cal.get('same_folder_top1')}/{cal.get('trials')} · own-note-wins {cal.get('own_note_wins')}/{cal.get('trials')} (sections {cal.get('sections')})")
     r = place(V, cfg, text, cache_path=cache, exclude=exclude)
-    out = os.path.join(sema_dir(), f"place-{C.ts()}.md")
+    out = C.fresh_path(os.path.join(sema_dir(), f"place-{C.ts()}.md"))
     with open(out, "w", encoding="utf-8") as fh:
         fh.write(place_md(r, src, cal))
     print(f"place    : {src} — {r['verdict']}")
@@ -1210,7 +1210,7 @@ def cmd_intake(V, cfg, argv):
     for n in r.get("must_read", []): print("   must read (both): " + n)
     for d in r.get("disputes", []): print(f"   dispute L{d['first']}–L{d['last']}: A → {final_dest(d['a'], note)} · B → {final_dest(d['b'], note)}")
     if r["status"] == "PLAN":
-        p = os.path.join(sema_dir(), f"intake-{C.ts()}.tsv")
+        p = C.fresh_path(os.path.join(sema_dir(), f"intake-{C.ts()}.tsv"))
         with open(p, "w", encoding="utf-8") as fh:
             fh.write(f"# intake plan for {note} — proposed, NOT ratified\n" + "".join(l + "\n" for l in r["plan"]))
         errs = C.simulate(V, C.load_plan(p), C.manifest_rows(V))[0]
@@ -1381,7 +1381,7 @@ def cmd_propose(V, cfg, argv):
     agreed, runs, act_runs = agree_detail(V, effA, effB)
     plan, rep = propose(V, cfg, agreed, runs)
     rep["act_disputes"], rep["rulings"] = act_runs, ruled
-    base = os.path.join(sema_dir(), f"proposal-{C.ts()}")
+    base = C.fresh_path(os.path.join(sema_dir(), f"proposal-{C.ts()}.tsv"))[:-4]
     with open(base + ".tsv", "w", encoding="utf-8") as fh:
         fh.write("# the organ's plan — proposed, NOT ratified\n" + "".join(l + "\n" for l in plan))
     errors = C.simulate(V, C.load_plan(base + ".tsv"), C.manifest_rows(V))[0] if plan else []
@@ -1477,7 +1477,7 @@ def main(argv):
             for rec in load_reading(f):
                 if rec.get("lines") == "*" and rec.get("subject"):
                     subjects[rec["note"]] = rec["subject"]
-        out = os.path.join(sema_dir(), f"titles-{C.ts()}.md")
+        out = C.fresh_path(os.path.join(sema_dir(), f"titles-{C.ts()}.md"))
         with open(out, "w", encoding="utf-8") as fh:
             fh.write(titles_md(r, V, cfg, subjects))
         print(f"titles   : {r['holds']}/{r['measured']} titles pick out their own note · {len(r['failing'])} do not · "

@@ -137,7 +137,11 @@ RATIFY_LOCK = threading.Lock()      # one run on the vault at a time: the page, 
 def safe_title(title):
     t = re.sub(r"[\x00-\x1f\x7f]+", " ", title)                      # a newline in a filename breaks every manifest after it
     t = re.sub(r"[\\/:*?\"<>|]", "—", t.strip()).strip(". ")
-    return (t or "Captured")[:120]
+    t = (t or "Captured")[:120]
+    while len((t + " 99 — original (2026-10-20).md").encode("utf-8")) > 255:   # a filename is 255 BYTES, 120 CJK characters are 360,
+                                                                                 # and the archived original adds its suffix (audit IV)
+        t = t[:-1]
+    return t.rstrip(". ") or "Captured"
 
 def capture(vault, cfg, title, text, source="", do_polish=False, url=None):
     if do_polish:                          # the model's minute is spent outside the lock; only the write waits for a run
@@ -289,8 +293,9 @@ def local_read(vault, cfg, note, shortlist, cal, who, tries=3, url=None):
         recs = parse_records(out)
         for r in recs:
             r["note"], r["note_sha"] = note, sha
-            r.setdefault("relation", ""); r.setdefault("with", []); r.setdefault("at", ""); r.setdefault("dest", "")
-            r.setdefault("subject", "?"); r.setdefault("use", "?"); r.setdefault("why", "")
+            for k, dv in (("relation", ""), ("with", []), ("at", ""), ("dest", ""), ("subject", "?"), ("use", "?"), ("why", "")):
+                if r.get(k) is None:                                  # a model writes null as often as it leaves a key out (audit IV)
+                    r[k] = dv
             r["_at"] = f"reader-{who}:{attempt}"
         if not recs:
             probs = ["no JSON records in the answer"]
@@ -586,7 +591,7 @@ def ask(vault, cfg, question, url=None, cache_path=None):
           f"Sources are the vault's own passages; nothing in the vault was changed.*\n\n{answer.strip()}\n\n## Sources\n"
           + "\n".join(f"- [{i}] `{h['note']}` {h['pid']} (L{h['start']}–L{h['end']}) {h['heading']}" for i, h in enumerate(hits, 1)))
     os.makedirs(ANSWERS, exist_ok=True)
-    path = os.path.join(ANSWERS, f"answer-{C.ts()}.md")
+    path = C.fresh_path(os.path.join(ANSWERS, f"answer-{C.ts()}.md"))
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(md)
     log(f"ask\t{question[:80]}\t{len(hits)} passages\t{path}")
@@ -642,7 +647,7 @@ def judge_titles(vault, cfg, url=None, notes=None, say=lambda *_: None):
     md += [f"| `{r['note']}` | {r['better']} | {r['why'][:120]} | {r['inbound']} |" for r in fails]
     md += ["", "The embedding instrument was tried first and proved blind to titles on this model (its control: a note's own first heading ranked its note first 2 of 88 times), so the judgment is a reading, one model, one pass — a proposal, not a verdict."]
     os.makedirs(S.sema_dir(), exist_ok=True)
-    path = os.path.join(S.sema_dir(), f"titles-read-{C.ts()}.md")
+    path = C.fresh_path(os.path.join(S.sema_dir(), f"titles-read-{C.ts()}.md"))
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(md) + "\n")
     log(f"titles\t{len(rows)} judged\t{len(fails)} not fixed points\t{path}")

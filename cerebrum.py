@@ -182,7 +182,7 @@ def cmd_manifest(_a):
     ensure_dirs()
     all_rows = manifest_rows(VAULT)
     rows = [r for r in all_rows if r[0] != "DIR"]
-    out = f"{STATE}/manifest-{ts()}.tsv"
+    out = fresh_path(f"{STATE}/manifest-{ts()}.tsv")      # two in one second must never share a file (audit IV)
     with open(out, "w", encoding="utf-8") as fh:
         for h, sz, rel in all_rows:
             fh.write(f"{h}\t{sz}\t{rel}\n")
