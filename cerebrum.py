@@ -80,6 +80,11 @@ def rels(vault):
 def is_frozen(rel):
     return any(rel == p or rel.startswith(p + os.sep) for p in FROZEN)
 
+def holds_frozen(rel):
+    """A folder with a frozen root somewhere beneath it: moving or removing it moves the frozen register (audit IV)."""
+    pre = rel.rstrip("/") + "/"
+    return any(p.startswith(pre) for p in FROZEN)
+
 def _is_real(vault):
     return bool(REAL_VAULT) and os.path.realpath(vault) == os.path.realpath(REAL_VAULT)
 
@@ -647,7 +652,7 @@ def simulate(vault, ops, before_rows):
     for n, op, args in ops:
         paths = args[:2] if op in ("mv", "append", "dedupe") else [] if op in ("leave", "partition", "pin") \
             else [args[0], args[2]] if op == "insert" else args[:1]
-        if any(is_frozen(p) for p in paths):
+        if any(is_frozen(p) or holds_frozen(p) for p in paths):
             errors.append(f"line {n}: touches the frozen register: {paths}"); continue
         if op in ("synthesize", "dedupe"):
             import semantics

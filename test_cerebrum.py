@@ -1046,6 +1046,17 @@ try:
           newb[:st] + newb[st + ln:] == nb and newb.endswith(b"block\n") and b"newline\n\nblock" in newb)
     check("insert after a line the note does not have is refused",
           C.simulate(v, write_plan(os.path.join(tmp20, "q.tsv"), ["insert\t3 RESOURCES/Songs.md\tL999\t# INBOX/Two.md\tP001"]), manifest(v))[0] != [])
+    # audit IV (2026-10-20): a mv of a folder holding a nested frozen root passed the dry run and moved the root
+    os.makedirs(os.path.join(v, "2 AREAS", "Life", "Journal")); open(os.path.join(v, "2 AREAS", "Life", "Journal", "d.md"), "w").write("day\n")
+    C.FROZEN.append("2 AREAS/Life/Journal")
+    try:
+        e_fold = C.simulate(v, write_plan(os.path.join(tmp20, "fz.tsv"), ["mv\t2 AREAS/Life\t3 RESOURCES/Life"]), manifest(v))[0]
+        e_trash = C.simulate(v, write_plan(os.path.join(tmp20, "fz2.tsv"), ["rmdir\t2 AREAS/Life"]), manifest(v))[0]
+        e_side = C.simulate(v, write_plan(os.path.join(tmp20, "fz3.tsv"), ["mv\t2 AREAS/Lif\t3 RESOURCES/Lif"]), manifest(v))[0]
+        check("a folder that holds a frozen root cannot be moved or removed; a sibling whose name is a prefix is not caught by it",
+              any("frozen" in e for e in e_fold) and any("frozen" in e for e in e_trash) and not any("frozen" in e for e in e_side))
+    finally:
+        C.FROZEN.remove("2 AREAS/Life/Journal"); shutil.rmtree(os.path.join(v, "2 AREAS", "Life"))
     check("insert into a note that does not exist is refused",
           C.simulate(v, write_plan(os.path.join(tmp20, "r.tsv"), ["insert\t3 RESOURCES/Nope.md\tL1\t# INBOX/Two.md\tP001"]), manifest(v))[0] != [])
     # the reading side: `at` names the section; agreement; the plan says insert
