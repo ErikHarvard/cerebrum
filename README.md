@@ -21,9 +21,9 @@ The rules are the three classical laws of thought, applied to a vault — *metal
 
 | Law | In a vault | Rules |
 |---|---|---|
-| **I. Identity** — A is A | Each note is itself: one name, one note; a link names one note. | one name, one note · no silent duplicates · every link names one note |
-| **II. Non-contradiction** — not both A and not-A | No fact is kept in two places that can disagree; no note holds what the rules forbid. | the frozen register agrees with the code · the law is where it says it is · no secrets in notes · outside pointers still land · the registry agrees with the vault |
-| **III. Excluded middle** — A or not-A | Every file has exactly one standing; every rule ends PASS or FAIL. | every file has one standing · one meta-area, no tower · meta-notes read without plugins · new notes are born in a home |
+| **I. Identity** — A is A | Each note is itself: one name, one note; a link names one note. | one name, one note · no silent duplicates · every link names one note · one inbox, one archive |
+| **II. Non-contradiction** — not both A and not-A | No fact is kept in two places that can disagree; no note holds what the rules forbid. | the frozen register agrees with the code · the law is where it says it is · no secrets in notes · outside pointers still land · the registry agrees with the vault · the law describes the tool it governs · every accepted exception still applies |
+| **III. Excluded middle** — A or not-A | Every file has exactly one standing; every rule ends PASS or FAIL. | every file has one standing · one meta-area, no tower · meta-notes read without plugins · new notes are born in a home · no notebook of one · no empty folder · a project is a goal with a deadline |
 
 ## Frozen folders
 
@@ -58,7 +58,11 @@ Close Obsidian before moving files; the mover refuses while it is open.
 | `compose <new.md> <src.md> <spec>` | a new note made of those pieces of a note, verbatim, in the order given |
 | `extend <note.md> <src.md> <spec>` | appends those pieces to an existing note, whose old text stays exactly as it was |
 | `leave <src.md> <spec>` | pieces deliberately left only in the source |
+| `insert <note.md> L<n> <src.md> <spec>` | those pieces placed after line n of an existing note, on their own lines, with a provenance line |
+| `pin <note.md> <sha256>` | the note must hold exactly these bytes at this point of the plan, or the plan is refused — an insert's line number is true only of them |
 | `partition <src.md> <sha256>` | declares the source is distributed completely: it must still be the note that was cut, and every one of its lines must be composed, extended or left exactly once |
+| `synthesize <new.md> <draft>` | a new note from a draft outside the vault; every paragraph cites a source part, and a changed source is refused |
+| `dedupe <note.md> <archive.md>` | later copies of repeated lines dropped from the note; the whole original is kept at the archive path |
 
 A `<spec>` lists pieces in order: a part (`P012`), a run of parts (`P011-P022`) or a line range (`L1542-L1600`).
 
@@ -89,6 +93,10 @@ python3 semantics.py converge <expect.json> <A> <B>   # after the plan ran: noth
 - **Nothing is lost.** A note whose lines go to more than one place is archived whole first, then partitioned: every line placed exactly once. Sources stay until a person removes them.
 - **Gates, each with a planted defect it must catch:** coverage, agreement, traceability (every paragraph of a synthesis cites the source parts it came from, by hash), lossless verify, and convergence (the notes a plan touched, read again, need nothing more).
 - **Triage is ordinal.** The index needs numpy and a local embedding model (ollama's `nomic-embed-text` by default; set `organ.embed_model` in `cerebrum.json`). Its scores only rank candidates for the readers. Two controls: identical copies must find each other, and the model must rank a paraphrase above an unrelated sentence. Notes accepted as sensitive are never read.
+
+## The Archivist
+
+`archivist.py` serves a page at `http://127.0.0.1:8765/` (and the Obsidian plugin in `obsidian-plugin/` talks to it): **capture** a note into the inbox, **place** an inbox note (a shortlist by meaning, two local readers, the intake gate), **ratify** the plan through every gate above, and **ask** the vault a question (retrieval by meaning and by words; the answer cites its sources and changes nothing). Its model (`bin/archivist-llm.sh`, a local llama-server) is off until it is switched on from the page or the plugin. An agreed placement moves itself (`auto_place`, on by default) — queued while Obsidian is open. Only inbox notes are placed; notes accepted as sensitive are never read; one run touches the vault at a time (`state/run.lock`), from the page or the shell.
 
 ## Tests
 
