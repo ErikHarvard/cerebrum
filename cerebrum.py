@@ -654,12 +654,16 @@ def simulate(vault, ops, before_rows):
             dirs.discard(q); dirs.add(d + q[len(s):])
 
     vacated = set()          # paths a mv or trash empties; a later MOVE onto one is refused (verifier blind spot, 2026-09-15);
-                             # a compose/synthesize at a vacated path is fine: its bytes are expected by hash
+                             # a compose/synthesize at a path a MV vacated is fine: its bytes are expected by hash
+    trashed = set()          # ... but not at a path a TRASH vacated: the verifier cannot judge that refill (audit IV, 2026-10-20)
     for n, op, args in ops:
         paths = args[:2] if op in ("mv", "append", "dedupe") else [] if op in ("leave", "partition", "pin") \
             else [args[0], args[2]] if op == "insert" else args[:1]
         if any(is_frozen(p) or holds_frozen(p) for p in paths):
             errors.append(f"line {n}: touches the frozen register: {paths}"); continue
+        made = args[1] if op == "dedupe" else args[0] if op in ("compose", "synthesize", "merge") else None
+        if made in trashed:
+            errors.append(f"line {n}: {op} refills a path this plan trashed: {made} — the verifier cannot judge it; split the plan"); continue
         if op in ("synthesize", "dedupe"):
             import semantics
             new = args[0] if op == "synthesize" else args[1]          # the file this op creates
@@ -728,7 +732,7 @@ def simulate(vault, ops, before_rows):
             (p,) = args
             if p not in files: errors.append(f"line {n}: trash target is not a file: {p}"); continue
             if origin[p] not in before_hash: errors.append(f"line {n}: trash of a file this plan creates is refused: {p}"); continue
-            removed.append(origin[p]); files.pop(p); origin.pop(p); buf.pop(p, None); vacated.add(p)
+            removed.append(origin[p]); files.pop(p); origin.pop(p); buf.pop(p, None); vacated.add(p); trashed.add(p)
         elif op == "merge":
             dst, srcs = args[0], args[1:]
             paths = [s[5:] if s.startswith("code:") else s for s in srcs]

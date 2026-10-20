@@ -1057,6 +1057,10 @@ try:
               any("frozen" in e for e in e_fold) and any("frozen" in e for e in e_trash) and not any("frozen" in e for e in e_side))
     finally:
         C.FROZEN.remove("2 AREAS/Life/Journal"); shutil.rmtree(os.path.join(v, "2 AREAS", "Life"))
+    open(os.path.join(v, "3 RESOURCES", "Twin.md"), "wb").write(open(songs, "rb").read())
+    e_tc = C.simulate(v, write_plan(os.path.join(tmp20, "tc.tsv"), ["trash\t3 RESOURCES/Twin.md", "compose\t3 RESOURCES/Twin.md\t# INBOX/Two.md\tP001"]), manifest(v))[0]
+    check("a compose at a path the same plan trashed is refused by the dry run (it could never verify GREEN — audit IV)", any("trashed" in e for e in e_tc))
+    os.remove(os.path.join(v, "3 RESOURCES", "Twin.md"))
     check("insert into a note that does not exist is refused",
           C.simulate(v, write_plan(os.path.join(tmp20, "r.tsv"), ["insert\t3 RESOURCES/Nope.md\tL1\t# INBOX/Two.md\tP001"]), manifest(v))[0] != [])
     # the reading side: `at` names the section; agreement; the plan says insert
