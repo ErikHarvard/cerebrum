@@ -422,6 +422,8 @@ def drain_queue(vault, cfg):
             res = ratify(vault, cfg, plan, intake=True)
         except Exception as e:                       # a crash is withdrawn like a RED, never retried every 15 s (audit IV)
             res = {"ok": False, "steps": [("ratify", f"crashed: {e!r}")]}
+        if res.get("busy"):                          # another run holds the vault: try again on the next look
+            log(f"auto-place\tqueued {q}\tbusy — left in the queue"); out.append((plan, False)); continue
         if res.get("ok"):
             log(f"auto-place\tqueued {q}\tGREEN"); os.remove(qp)
         else:                                        # withdrawn with its reason on record; the note stays in the inbox for the keeper
@@ -450,13 +452,15 @@ def queue_worker(vault, cfg, every=15):
 def ratify(vault, cfg, plan_path, frozen_live=True, intake=False):
     """Rehearsal first (it moves nothing), then snapshot, manifest, the mover, a separate verify, the Acta, the registry.
     Serialised: two runs at once would read each other's moves as unratified."""
-    with RATIFY_LOCK:
+    with RATIFY_LOCK, C.run_lock() as lk:
+        if not lk.held:
+            return {"ok": False, "busy": True, "steps": [("lock", C.BUSY)]}
         return _ratify(vault, cfg, plan_path, frozen_live, intake)
 
 def _ratify(vault, cfg, plan_path, frozen_live, intake):
     import subprocess
     py, here = sys.executable, HERE
-    env = dict(os.environ, VAULT=vault)
+    env = dict(os.environ, VAULT=vault, CEREBRUM_RUN_LOCKED="1")     # this run holds the lock; its own steps must not wait on it
     def run(*args):
         r = subprocess.run([py, *args], cwd=here, capture_output=True, text=True, env=env)
         return r.returncode, (r.stdout + r.stderr).strip()

@@ -106,6 +106,29 @@ def _hash_all(vault):
             pass
     return out
 
+class run_lock:
+    """One run on the vault at a time, across processes: the keeper's shell and the Archivist's service share it
+    (audit IV, 2026-10-20 — RATIFY_LOCK was per process). The Archivist's own steps run with CEREBRUM_RUN_LOCKED=1:
+    the lock is already held for them. `held` is False when another run has it."""
+    def __enter__(self):
+        import fcntl
+        self.fh = None
+        if os.environ.get("CEREBRUM_RUN_LOCKED") == "1":
+            self.held = True; return self
+        ensure_dirs()
+        self.fh = open(os.path.join(STATE, "run.lock"), "a")
+        try:
+            fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB); self.held = True
+        except BlockingIOError:
+            self.held = False
+        return self
+    def __exit__(self, *exc):
+        if self.fh:
+            self.fh.close()                     # closing releases the lock
+        return False
+
+BUSY = "another run on the vault is in progress (the Archivist or a shell) — try again when it finishes"
+
 def ensure_dirs():
     os.makedirs(SNAPS, exist_ok=True)
     os.makedirs(STATE, exist_ok=True)
@@ -1212,6 +1235,12 @@ def cmd_move(a):
         print("move     : dry run OK — nothing changed. Add --apply --i-ratified to act."); return 0
     if not a.i_ratified:
         print("move: refused. --apply needs --i-ratified (the keeper has ratified this plan)."); return 2
+    with run_lock() as lk:
+        if not lk.held:
+            print(f"move: refused. {BUSY}."); return 2
+        return _move_apply(a, real, ops, before_rows, expect)
+
+def _move_apply(a, real, ops, before_rows, expect):
     if real and _obsidian_running():
         print("move: refused. Close Obsidian first — it rewrites files while open."); return 2
     stale = snapshot_stale(SNAPS, STATE)
@@ -1252,6 +1281,12 @@ def cmd_undo(a):
         print("undo: refused on the live vault without --i-ratified."); return 2
     if real and _obsidian_running():
         print("undo: refused. Close Obsidian first."); return 2
+    with run_lock() as lk:
+        if not lk.held:
+            print(f"undo: refused. {BUSY}."); return 2
+        return _undo_run(a, real)
+
+def _undo_run(a, real):
     notes = undo_plan(VAULT, a.log, trash_fn=_gio_trash if real else None)
     ledger("intake", event="undo", log=os.path.abspath(a.log), by="the keeper's word", notes=notes,
            ops=[l.split("\t")[1:4] for l in open(a.log, encoding="utf-8").read().splitlines() if l.split("\t")[1:2] not in (["plan-begin"], ["plan-end"], ["trashed-to"])])

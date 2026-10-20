@@ -1749,6 +1749,16 @@ try:
     finally:
         AR.QUEUE_DIR, AR._obsidian_open, AR.ratify = _qd, _oo, _rt
     check("a queued plan whose run crashes is withdrawn with its reason, never retried forever (audit IV)", left == [] and out_q and out_q[0][1] is False)
+    # audit IV (2026-10-20): the shell's move/undo and the service's runs were not serialised across processes
+    import subprocess as _sp
+    with C.run_lock() as _lk:
+        r_cli = _sp.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "cerebrum.py"), "undo", "--log", "/nonexistent-undo.tsv"],
+                        capture_output=True, text=True, env=dict(os.environ, CEREBRUM_STATE=C.STATE, VAULT=tmp27))
+        r_ar = AR.ratify(tmp27, {}, "/nonexistent-plan.tsv")
+    with C.run_lock() as _lk2:
+        free = _lk2.held
+    check("while one run holds the vault, a shell undo and the Archivist's ratify are both refused as busy; then the lock is free",
+          _lk.held and r_cli.returncode == 2 and "another run" in r_cli.stdout and r_ar.get("busy") is True and free)
     check("one placement at a time: ratify holds a lock", isinstance(AR.RATIFY_LOCK, type(__import__("threading").Lock())))
     secs31 = [{"note": f"n{i}.md", "heading": "", "text": "plain words here"} for i in range(50)] + [{"note": "koinonia.md", "heading": "", "text": "KOINŌNIA and ΣΟΦΙΩΝ meet"}]
     o1 = AR._lexical_order("what is KOINŌNIA?", secs31); o2 = AR._lexical_order("ΣΟΦΙΩΝ", secs31); o3 = AR._lexical_order("nothing matches xyzzy", secs31)
