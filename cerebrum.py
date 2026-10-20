@@ -141,7 +141,7 @@ def take_snapshot(vault):
                 except FileNotFoundError:
                     vanished.append(rel)
     with tarfile.open(out, "r:gz") as tar:
-        names = {m.name[len("vault/"):] for m in tar.getmembers() if m.isfile()}
+        names = {m.name[len("vault/"):] for m in tar.getmembers() if m.isfile() or m.issym()}   # a symlink is kept as itself (audit IV)
     movable = [r for r in listed if not is_frozen(r)]
     missing_movable = [r for r in movable if r not in names]
     ok = not missing_movable and len(names) == len(listed) - len(vanished)

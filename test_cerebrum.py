@@ -1487,10 +1487,14 @@ try:
           and os.path.isfile(os.path.join(v3, "3 RESOURCES", "X", "Copy A.md")))     # left where it is, and said so
     if raised: print("      raised:", raised)
 
-    # M4 — a MISMATCH archive never satisfies the snapshot gate (a dangling symlink is listed but not archived as a file)
+    # M4 — a MISMATCH archive never satisfies the snapshot gate (a FIFO is listed but archived as neither file nor link)
     v4, _ = organ_vault(os.path.join(tmp27, "m4"))
-    os.symlink(os.path.join(tmp27, "nowhere.md"), os.path.join(v4, "3 RESOURCES", "dangling.md"))
     C.SNAPS = os.path.join(tmp27, "snaps"); os.makedirs(C.SNAPS)
+    os.symlink("Songs.md", os.path.join(v4, "3 RESOURCES", "Linked.md"))
+    ok4s, out4s, _ = C.take_snapshot(v4); os.remove(out4s)
+    check("a vault holding a symlink snapshots OK — the link is archived as itself (audit IV: every snapshot was MISMATCH)", ok4s)
+    os.remove(os.path.join(v4, "3 RESOURCES", "Linked.md"))
+    os.mkfifo(os.path.join(v4, "3 RESOURCES", "dangling.md"))
     ok4, out4, lines4 = C.take_snapshot(v4)
     check("a snapshot that does not hold every listed file is MISMATCH, kept under a name the gate does not see",
           not ok4 and out4.endswith(".MISMATCH") and os.path.isfile(out4) and "MISMATCH" in lines4[0]
