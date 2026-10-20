@@ -1277,6 +1277,18 @@ try:
         r6 = AR.polish_note(v, ocfg, rel4); body6 = open(os.path.join(v, rel4), encoding="utf-8").read(); head6 = body6.split("\n---\n", 1)[0]
         check("polishing it with a working model: one `polished:` line in the header, the raw block once",
               r6["polished"] is True and head6.count("polished: ") == 1 and "polished: by the Archivist" in head6 and body6.count("Raw capture, verbatim") == 1)
+        # audit IV (2026-10-20): a capture written in the middle of a run turned that run RED
+        import threading as _th, time as _tm
+        held = _th.Event(); go = _th.Event()
+        def _hold():
+            with AR.RATIFY_LOCK:
+                held.set(); go.wait(5)
+        t_h = _th.Thread(target=_hold); t_h.start(); held.wait(5)
+        got = []
+        t_c = _th.Thread(target=lambda: got.append(AR.capture(v, ocfg, "during a run", "words"))); t_c.start()
+        _tm.sleep(0.5); waited = not got and not any("during a run" in n for n in os.listdir(os.path.join(v, "# INBOX")))
+        go.set(); t_c.join(5); t_h.join(5)
+        check("a capture made while a run holds the vault waits for it, then lands", waited and got and os.path.isfile(os.path.join(v, got[0])))
         check("the suite wrote nothing into the live Archivist log", AR.LOG != _real_log and os.path.isfile(AR.LOG))
     finally:
         AR.llm = real_llm; AR.CACHE_PATH = None; os.environ.pop("CEREBRUM_EMBED", None); importlib.reload(SEM); AR.S = SEM

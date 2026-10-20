@@ -133,19 +133,25 @@ def polish(text, url=None):
     return body, ok
 
 # ---- capture: the keeper's click puts a note in the inbox ---------------------------------------
+RATIFY_LOCK = threading.Lock()      # one run on the vault at a time: the page, a handler and the queue worker share the mover (2026-09-15); captures and polishes take it too (2026-10-20)
 def safe_title(title):
     t = re.sub(r"[\x00-\x1f\x7f]+", " ", title)                      # a newline in a filename breaks every manifest after it
     t = re.sub(r"[\\/:*?\"<>|]", "—", t.strip()).strip(". ")
     return (t or "Captured")[:120]
 
 def capture(vault, cfg, title, text, source="", do_polish=False, url=None):
+    if do_polish:                          # the model's minute is spent outside the lock; only the write waits for a run
+        text, polished = polish(text, url=url)
+    else:
+        polished = False
+    with RATIFY_LOCK:                      # a capture written during a run made its manifest-then-move check go RED (audit IV)
+        return _capture(vault, cfg, title, text, source, do_polish, polished)
+
+def _capture(vault, cfg, title, text, source, do_polish, polished):
     inbox = list(cfg.get("para", C.PARA))[0]
     name = safe_title(title); rel = f"{inbox}/{name}.md"; k = 1
     while os.path.lexists(os.path.join(vault, rel)):
         k += 1; rel = f"{inbox}/{name} {k}.md"
-    polished = False
-    if do_polish:
-        text, polished = polish(text, url=url)
     head = (f"---\ncaptured: {datetime.now().strftime('%Y-%m-%d %H:%M')}\nvia: the Archivist\n" + (f"source: {source}\n" if source else "")
             + ("polished: by the Archivist — spelling, grammar and structure; the raw capture is kept verbatim at the end\n" if polished
                else "polished: no — the raw text as sent\n" if do_polish else "") + "---\n\n")
@@ -170,6 +176,12 @@ def polish_note(vault, cfg, rel, url=None):
     if "polished: by the Archivist" in head:
         return {"error": "already polished"}
     new_body, ok = polish(body.strip("\n"), url=url)
+    with RATIFY_LOCK:
+        if not os.path.isfile(p) or open(p, encoding="utf-8").read() != text:          # changed while the model read it: nothing is overwritten
+            return {"error": "the note changed while it was being polished — polish it again"}
+        return _write_polished(p, rel, head, new_body, ok)
+
+def _write_polished(p, rel, head, new_body, ok):
     if not ok:                             # the note is left exactly as it was (audit IV: a failed polish nested the raw block and doubled the header)
         log(f"polish\t{rel}\traw kept")
         return {"note": rel, "polished": False}
@@ -420,7 +432,6 @@ def queue_worker(vault, cfg, every=15):
             log(f"error\tqueue\t{e!r}")
 
 # ---- ratify: the keeper's word → the mover under every gate ----------------------------------------
-RATIFY_LOCK = threading.Lock()      # one run on the vault at a time: the page, a handler and the queue worker share the mover (2026-09-15)
 
 def ratify(vault, cfg, plan_path, frozen_live=True, intake=False):
     """Rehearsal first (it moves nothing), then snapshot, manifest, the mover, a separate verify, the Acta, the registry.
