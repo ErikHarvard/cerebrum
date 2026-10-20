@@ -123,7 +123,7 @@ def r_links(v):
         if not MD(p) or p in verbatim or p in sensitive:
             continue
         for m in C.WIKI.finditer(C._strip_code(v.text(p))):
-            t = m.group(1).split("|")[0].split("#")[0].strip()
+            t = C.link_target(m.group(1))
             tl = C.link_key(t)
             if not t or (p.lower(), t.lower()) in ok:
                 continue
@@ -473,7 +473,7 @@ def r_exceptions(v):
     links_in = {}
     for p in v.movable:
         if MD(p) and p not in sensitive:
-            links_in[p.lower()] = {m.group(1).split("|")[0].split("#")[0].strip().lower() for m in C.WIKI.finditer(C._strip_code(v.text(p)))}
+            links_in[p.lower()] = {C.link_target(m.group(1)).lower() for m in C.WIKI.finditer(C._strip_code(v.text(p)))}
     names = {base(p) for p in v.visible if MD(p)} | {os.path.basename(p).lower() for p in v.visible}
     for x in a.get("broken_links", []):
         if not isinstance(x, dict) or "in" not in x or "to" not in x:

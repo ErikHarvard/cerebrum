@@ -649,7 +649,7 @@ def inbound_links(vault, cfg, rel):
         if p == rel:
             continue
         for m in C.WIKI.finditer(C._strip_code(read_bytes(vault, p).decode("utf-8", "replace"))):
-            t = m.group(1).split("|")[0].split("#")[0].strip().lower()
+            t = C.link_target(m.group(1)).lower()
             if t == name or t == name + ".md" or t.endswith("/" + name) or t.endswith("/" + name + ".md"):
                 out.append(p); break
     return out

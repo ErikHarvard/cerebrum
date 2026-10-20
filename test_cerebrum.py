@@ -1128,6 +1128,13 @@ try:
     check("the accepted pair passes", links.fn(K.Vault(v2, cfg2)) == [])
     open(os.path.join(v2, "# INBOX", "New.md"), "w").write("also [[Gone Note]]\n")
     check("a NEW link to the same missing name, from another note, is caught", any("New.md" in p for p in links.fn(K.Vault(v2, cfg2))))
+    # audit IV (2026-10-20): Obsidian's table form [[B\|alias]] read as a link to "B\" — a false break, and a real break missed
+    open(os.path.join(v2, "3 RESOURCES", "Tabled.md"), "w").write("| note | why |\n|---|---|\n| [[Songs\\|the songs]] | tempo |\n")
+    check("a table-form link [[Songs\\|alias]] names Songs", not any("Tabled.md" in p for p in links.fn(K.Vault(v2, cfg2))))
+    bt = manifest(v2); ops_t = write_plan(os.path.join(tmp21, "tab.tsv"), ["mv\t3 RESOURCES/Songs.md\t3 RESOURCES/Songs Two.md"])
+    ok_t, f_t, _ = C.apply_plan(v2, ops_t, bt, C._scratch_trash_fn(os.path.join(tmp21, "_tt")), os.path.join(tmp21, "tab-u.tsv"))
+    check("… and a rename that breaks it does not verify GREEN", not ok_t and any("Tabled.md" in x for x in f_t))
+    C.undo_plan(v2, os.path.join(tmp21, "tab-u.tsv")); os.remove(os.path.join(v2, "3 RESOURCES", "Tabled.md"))
     exc = [r for r in K.RULES if r.name == "every accepted exception still applies"][0]
     os.remove(os.path.join(v2, "# INBOX", "New.md"))
     check("the exception still applies while the note still links to the missing target", not any("broken link" in p for p in exc.fn(K.Vault(v2, cfg2))))

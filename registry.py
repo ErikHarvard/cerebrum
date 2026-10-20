@@ -67,7 +67,7 @@ def build(root, cfg):
     out_n, in_n = Counter(), Counter()
     for p in notes:
         for m in C.WIKI.finditer(C._strip_code(text[p])):
-            t = m.group(1).split("|")[0].split("#")[0].strip().lower()
+            t = C.link_target(m.group(1)).lower()
             if not t:
                 continue
             out_n[p] += 1

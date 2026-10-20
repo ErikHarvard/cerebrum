@@ -198,6 +198,12 @@ def cmd_manifest(_a):
 # markdown-path links — deliberately, so we don't ship an untested resolution path.
 WIKI = re.compile(r"!?\[\[([^\]]+)\]\]")
 
+def link_target(inner):
+    """The note a [[link]] names: before the alias and the heading. Inside a table Obsidian writes the alias bar
+    escaped, [[Note\\|alias]] — the backslash is not part of the name (audit IV, 2026-10-20)."""
+    t = inner.split("|")[0]
+    return (t[:-1] if t.endswith("\\") else t).split("#")[0].strip()
+
 def link_key(s):
     """How two names are compared for a link: case-folded and NFC-normalised (a macOS-written NFD filename
     and an NFC link are the same name to Obsidian; found blind 2026-09-15)."""
@@ -246,7 +252,7 @@ def cmd_inventory(_a):
             continue
         for m in WIKI.finditer(_strip_code(text)):
             total_links += 1
-            target = m.group(1).split("|")[0].split("#")[0].strip()
+            target = link_target(m.group(1))
             if not target:
                 continue
             if "/" in target:
@@ -438,7 +444,7 @@ def _verify(vault, before_rows, expected_moves=None, expected_removed=None, expe
         except Exception:
             continue
         for m in WIKI.finditer(_strip_code(text)):
-            t = m.group(1).split("|")[0].split("#")[0].strip()
+            t = link_target(m.group(1))
             if t and resolves(t, ib) and not resolves(t, ia):
                 if frozen_live and not resolves(t, ib_movable):
                     notes.append(f"NOTE link to a frozen (live) file now broken: {rel} -> {m.group(0)}")
