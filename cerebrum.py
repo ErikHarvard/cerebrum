@@ -1037,8 +1037,15 @@ def undo_plan(vault, undo_path, trash_fn=None):
     if begin and os.path.realpath(begin[0][2]) != os.path.realpath(vault):
         raise RuntimeError(f"undo log belongs to another vault: {begin[0][2]}")
     trashed_to = {f[2]: f[3] for f in lines if f[1] == "trashed-to"}
+    made_here = {f[2] for f in lines if f[1] in ("merge", "compose", "synthesize")}
     J = lambda p: os.path.join(vault, p)
     notes = []
+    def gone(d):                 # a run undone twice (audit IV): a note the plan made is already gone with it; any other is reported
+        if os.path.lexists(J(d)):
+            return False
+        if d not in made_here:
+            notes.append(f"could not restore {d} — it is missing; recover it from the snapshot")
+        return True
     for f in reversed(lines):
         op, args = f[1], f[2:]
         if op == "mkdir":
@@ -1058,6 +1065,7 @@ def undo_plan(vault, undo_path, trash_fn=None):
                 notes.append(f"could not move {d} back to {s} — something else now stands at {s}")
         elif op == "insert":
             d, start, ln, sha_old = args
+            if gone(d): continue
             with open(J(d), "rb") as fh: data = fh.read()
             if hashlib.sha256(data).hexdigest() != sha_old:
                 cut = data[:int(start)] + data[int(start) + int(ln):]
@@ -1067,6 +1075,7 @@ def undo_plan(vault, undo_path, trash_fn=None):
                 with open(J(d), "wb") as fh: fh.write(cut)
         elif op in ("append", "extend"):
             d, _s, n_old, sha_old = args
+            if gone(d): continue
             with open(J(d), "rb") as fh: data = fh.read()
             if hashlib.sha256(data).hexdigest() != sha_old:
                 cut = data[:int(n_old)]
@@ -1245,10 +1254,6 @@ def cmd_undo(a):
         # the log's growth and the registry's regeneration are lawful changes; everything else must equal the before-manifest
         import registry
         acta = os.path.join(os.path.dirname(CFG.get("law", "")), "ACTA CEREBRI.md") if CFG.get("law") else ""
-        if acta and os.path.isfile(os.path.join(VAULT, acta)):
-            with open(os.path.join(VAULT, acta), "a", encoding="utf-8") as fh:
-                fh.write(f"\n## {datetime.now().strftime('%Y-%m-%d %H:%M')} — Undone: `{os.path.basename(a.log)}`\n"
-                         f"The run reversed from its undo map, on the keeper's word; verified against the manifest it was planned against.\n")
         if CFG.get("registry"):
             registry.write(VAULT, CFG)
         tolerated = {p: sha256(os.path.join(VAULT, p)) for p in (acta, CFG.get("registry", ""), CFG.get("archivum", ""))   # the registry regen writes the Archivum too (found live 2026-09-15)
@@ -1258,6 +1263,14 @@ def cmd_undo(a):
                                else "RED — the vault does not equal its before-manifest:"))
         if not ok:
             _print_findings(fs, limit=20)
+        if acta and os.path.isfile(os.path.join(VAULT, acta)):   # the record says what the verify found, written after it (audit IV)
+            with open(os.path.join(VAULT, acta), "a", encoding="utf-8") as fh:
+                fh.write(f"\n## {datetime.now().strftime('%Y-%m-%d %H:%M')} — Undone: `{os.path.basename(a.log)}`\n"
+                         + ("The run reversed from its undo map, on the keeper's word; verified against the manifest it was planned against.\n" if ok and not notes
+                            else "The run reversed from its undo map, on the keeper's word — NOT verified: " + "; ".join(
+                                notes + ([] if ok else ["the vault does not equal the manifest it was planned against"])) + ".\n"))
+            if CFG.get("registry"):
+                registry.write(VAULT, CFG)
         return 0 if ok and not notes else 1
     print("undo     : not verified — the log names no before-manifest (a run older than this check)")
     return 1 if notes else 0

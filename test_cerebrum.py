@@ -1196,8 +1196,32 @@ try:
     if crashed: print("      crashed:", crashed)
     open(os.path.join(v, "2 AREAS", "Copy A.md"), "a").write("tampered after undo\n")
     ok2, f2, _ = C.apply_plan(v, ops, manifest(v), C._scratch_trash_fn(os.path.join(tmp26, "_t2")), undo26 + ".2", before_path=bpath)
+    _acta26 = os.path.join(v, "2 AREAS", "ACTA CEREBRI.md"); open(_acta26, "w").write("# Acta\n")
+    C.CFG = dict(C.CFG, law="2 AREAS/LAW.md")
     rc2 = C.cmd_undo(_ap.Namespace(log=undo26 + ".2", i_ratified=False))
+    C.CFG = dict(C.CFG, law=""); acta26 = open(_acta26).read(); os.remove(_acta26)
     check("… and reports RED (rc 1) when the vault after undo differs from that manifest", rc2 == 1)
+    check("… and its Acta entry says NOT verified — the record is written after the verify, never before (audit IV)",
+          "NOT verified" in acta26 and "verified against the manifest it was planned against" not in acta26)
+    # audit IV (2026-10-20): the same undo run twice crashed on a note the first run had already removed
+    open(os.path.join(v, "3 RESOURCES", "Src.md"), "w").write("# A\n\none\n\n# B\n\ntwo\n")
+    b27 = manifest(v); u27 = os.path.join(tmp26, "u27.tsv")
+    ops27 = write_plan(os.path.join(tmp26, "p27.tsv"), ["compose\t3 RESOURCES/Made.md\t3 RESOURCES/Src.md\tP000", "extend\t3 RESOURCES/Made.md\t3 RESOURCES/Src.md\tP001"])
+    ok27, f27, _ = C.apply_plan(v, ops27, b27, C._scratch_trash_fn(os.path.join(tmp26, "_t27")), u27)
+    n1 = C.undo_plan(v, u27)
+    try:
+        n2 = C.undo_plan(v, u27); crashed = False
+    except Exception as e:
+        n2, crashed = [repr(e)], True
+    check("undo run twice: the second run changes nothing and does not crash", ok27 and n1 == [] and not crashed and n2 == []
+          and not os.path.exists(os.path.join(v, "3 RESOURCES", "Made.md")))
+    open(os.path.join(v, "3 RESOURCES", "Src.md"), "w").write("# A\n\none\n")
+    ops28 = write_plan(os.path.join(tmp26, "p28.tsv"), ["extend\t3 RESOURCES/Songs.md\t3 RESOURCES/Src.md\tP000"]); u28 = os.path.join(tmp26, "u28.tsv")
+    C.apply_plan(v, ops28, manifest(v), C._scratch_trash_fn(os.path.join(tmp26, "_t28")), u28)
+    _songs = open(os.path.join(v, "3 RESOURCES", "Songs.md"), "rb").read(); os.remove(os.path.join(v, "3 RESOURCES", "Songs.md"))
+    n3 = C.undo_plan(v, u28)
+    check("… and a pre-existing note found missing is reported, not skipped", any("Songs.md" in x and "missing" in x for x in n3))
+    open(os.path.join(v, "3 RESOURCES", "Songs.md"), "wb").write(_songs); C.undo_plan(v, u28); os.remove(os.path.join(v, "3 RESOURCES", "Src.md"))
 finally:
     C.VAULT, C.STATE, C.CFG = _rv, _rs, _rc
 
@@ -1660,6 +1684,9 @@ try:
           and os.path.isfile(os.path.join(v31, "# INBOX", "Mixed.md")))
     if r1 != [(pl31, False)] or os.listdir(C.SNAPS): print("      ", r1, os.listdir(C.SNAPS), logtxt[-300:])
     os.environ.pop("CEREBRUM_SNAPSHOTS", None); os.environ.pop("CEREBRUM_STATE", None); C.SNAPS = _rsn
+    st_a = []; AR._auto_undo(lambda *a: (0, "undo     : done\nundo     : not verified — the log names no before-manifest"), st_a, "u.tsv")
+    st_b = []; AR._auto_undo(lambda *a: (0, "undo     : done\nundo     : verified — the vault equals the manifest"), st_b, "u.tsv")
+    check("an auto-undo the verify did not confirm is never called undone", st_a[0][0] == "undo NOT done" and st_b[0][0] == "undone")
     check("one placement at a time: ratify holds a lock", isinstance(AR.RATIFY_LOCK, type(__import__("threading").Lock())))
     secs31 = [{"note": f"n{i}.md", "heading": "", "text": "plain words here"} for i in range(50)] + [{"note": "koinonia.md", "heading": "", "text": "KOINŌNIA and ΣΟΦΙΩΝ meet"}]
     o1 = AR._lexical_order("what is KOINŌNIA?", secs31); o2 = AR._lexical_order("ΣΟΦΙΩΝ", secs31); o3 = AR._lexical_order("nothing matches xyzzy", secs31)

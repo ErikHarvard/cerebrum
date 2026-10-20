@@ -483,7 +483,7 @@ def _ratify(vault, cfg, plan_path, frozen_live, intake):
 def _auto_undo(run, steps, undo):
     rc2, out2 = run("cerebrum.py", "undo", "--log", undo, "--i-ratified")
     last = out2.splitlines()[-1] if out2 else ""
-    if rc2 == 0 and "verified" in out2:
+    if rc2 == 0 and "undo     : verified" in out2:       # not "not verified" (audit IV: a bare "verified" matched both)
         steps.append(("undone", last)); log(f"auto-place\tRED → undone\t{undo}")
     else:                                            # refused (Obsidian reopened) or itself red: say so, never call it undone
         steps.append(("undo NOT done", last)); log(f"auto-place\tRED and the undo did not complete: {last[:160]}\t{undo}")
