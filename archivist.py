@@ -127,7 +127,9 @@ def polish(text, url=None):
     except Exception as e:
         log(f"polish\tfailed\t{e!r}"); out = ""
     ok = bool(out) and len(out) >= len(raw) * 0.5
-    body = (out if ok else raw) + "\n\n> [!note]- Raw capture, verbatim — the keeper's own words as sent\n" + "\n".join("> " + l for l in raw.splitlines()) + "\n"
+    if not ok:                             # nothing polished: the raw words are the body, never also a verbatim copy of themselves
+        return raw, False
+    body = out + "\n\n> [!note]- Raw capture, verbatim — the keeper's own words as sent\n" + "\n".join("> " + l for l in raw.splitlines()) + "\n"
     return body, ok
 
 # ---- capture: the keeper's click puts a note in the inbox ---------------------------------------
@@ -168,8 +170,11 @@ def polish_note(vault, cfg, rel, url=None):
     if "polished: by the Archivist" in head:
         return {"error": "already polished"}
     new_body, ok = polish(body.strip("\n"), url=url)
-    head = head.replace("polished: no — the raw text as sent\n", "")
-    head += "\npolished: by the Archivist — spelling, grammar and structure; the raw capture is kept verbatim at the end" if ok else "\npolished: no — the model returned nothing usable"
+    if not ok:                             # the note is left exactly as it was (audit IV: a failed polish nested the raw block and doubled the header)
+        log(f"polish\t{rel}\traw kept")
+        return {"note": rel, "polished": False}
+    head = "\n".join(l for l in head.split("\n") if not l.startswith("polished: "))
+    head += "\npolished: by the Archivist — spelling, grammar and structure; the raw capture is kept verbatim at the end"
     with open(p, "w", encoding="utf-8") as fh:
         fh.write(head + "\n---\n\n" + new_body)
     log(f"polish\t{rel}\t{'ok' if ok else 'raw kept'}")
@@ -285,7 +290,21 @@ def local_read(vault, cfg, note, shortlist, cal, who, tries=3, url=None):
     return recs, probs, transcript
 
 # ---- place: shortlist → two readers → the intake gate ---------------------------------------------
+def place_problem(cfg, note):
+    """What the Archivist may place: a note in the inbox, never a sensitive or frozen one (audit IV, 2026-10-20:
+    /api/place took any vault note — Passwords.md was read to the model and auto-placed with no ratification)."""
+    inbox = list(cfg.get("para", C.PARA))[0]
+    if not note.startswith(inbox + "/") or not note.endswith(".md"):
+        return f"only a note in the inbox: {note}"
+    if note in set(cfg.get("accepted", {}).get("sensitive", [])):
+        return f"a note accepted as sensitive is never read: {note}"
+    return f"a note in the frozen register: {note}" if C.is_frozen(note) else ""
+
 def place_note(vault, cfg, note, url=None, say=lambda *_: None):
+    pp = place_problem(cfg, note)
+    if pp:
+        log(f"place\t{note}\tREFUSED\t{pp}")
+        return {"status": "REFUSED", "problems": [pp]}
     cache = CACHE_PATH or os.path.join(S.sema_dir(), "embeddings.json")
     probs = S.place_control(vault, cfg, cache_path=cache)
     if probs:

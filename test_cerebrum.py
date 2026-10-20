@@ -1209,6 +1209,21 @@ try:
         AR.llm = lambda messages, **k: "no json at all"
         r2 = AR.place_note(v, ocfg, rel2)
         check("a reader that returns no records is a PROBLEM, never a plan", r2["status"] == "PROBLEM" and "plan" not in r2)
+        # audit IV (2026-10-20): place took any vault note — a sensitive one was read to the model and auto-placed
+        seen = []
+        AR.llm = lambda messages, **k: seen.append(messages) or '{"lines": "*", "op": "keep", "dest": "3 RESOURCES/Songs.md", "subject": "s", "use": "u", "why": "w"}'
+        open(os.path.join(v, "# INBOX", "Secret.md"), "w", encoding="utf-8").write("the keeper's private words\n")
+        _acc = ocfg.setdefault("accepted", {}); _sens = list(_acc.get("sensitive", [])); _acc["sensitive"] = _sens + ["# INBOX/Secret.md"]
+        try:
+            r_s = AR.place_note(v, ocfg, "# INBOX/Secret.md")
+            r_f = AR.place_note(v, ocfg, "3 RESOURCES/Songs.md")
+            check("place refuses a note accepted as sensitive and a note outside the inbox — and the model never reads either",
+                  r_s["status"] == "REFUSED" and r_f["status"] == "REFUSED" and "plan" not in r_s and "plan" not in r_f and seen == []
+                  and os.path.isfile(os.path.join(v, "# INBOX", "Secret.md")))
+            check("a reader may not name a sensitive note as its destination",
+                  "sensitive" in SEM.dest_problem("# INBOX/Secret.md", ocfg) and SEM.dest_problem("3 RESOURCES/Songs.md", ocfg) == "")
+        finally:
+            _acc["sensitive"] = _sens; os.remove(os.path.join(v, "# INBOX", "Secret.md"))
         AR.llm = lambda messages, **k: "The verse says: tempo and hook [1]."
         mw = SEM.MIN_WORDS; SEM.MIN_WORDS = 5                     # the fixture's sections are short
         try:
@@ -1245,6 +1260,14 @@ try:
         rel4 = AR.capture(v, ocfg, "polish fails", "raw stays", do_polish=True)
         body4 = open(os.path.join(v, rel4), encoding="utf-8").read()
         check("polish that returns nothing → the raw text is used and the header says no", "polished: no" in body4 and "raw stays" in body4)
+        check("… and the raw words are not also copied beneath themselves", "Raw capture, verbatim" not in body4 and body4.count("raw stays") == 1)
+        before5 = open(os.path.join(v, rel4), "rb").read()
+        r5 = AR.polish_note(v, ocfg, rel4)
+        check("polishing that note again with a model that returns nothing leaves it byte for byte", r5["polished"] is False and open(os.path.join(v, rel4), "rb").read() == before5)
+        AR.llm = lambda messages, **k: "# Raw\n\nThe raw text stays as it is.\n"
+        r6 = AR.polish_note(v, ocfg, rel4); body6 = open(os.path.join(v, rel4), encoding="utf-8").read(); head6 = body6.split("\n---\n", 1)[0]
+        check("polishing it with a working model: one `polished:` line in the header, the raw block once",
+              r6["polished"] is True and head6.count("polished: ") == 1 and "polished: by the Archivist" in head6 and body6.count("Raw capture, verbatim") == 1)
         check("the suite wrote nothing into the live Archivist log", AR.LOG != _real_log and os.path.isfile(AR.LOG))
     finally:
         AR.llm = real_llm; AR.CACHE_PATH = None; os.environ.pop("CEREBRUM_EMBED", None); importlib.reload(SEM); AR.S = SEM
