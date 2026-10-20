@@ -521,6 +521,8 @@ def cmd_selftest(_a):
 #   compose <new.md> <src.md> <spec>  a new note made of those pieces of src, verbatim, in that order
 #   extend  <note.md> <src.md> <spec> those pieces appended to an existing note, which stays as it was
 #   leave   <src.md> <spec>           pieces deliberately left only in src, placed nowhere else
+#   pin     <note.md> <sha256>        the note must hold exactly these bytes at this point of the plan, or
+#                                     the plan is refused (an insert's line anchor is only true of them)
 #   partition <src.md> <sha256>       src is distributed completely: its bytes must still hash to
 #                                     sha256, and every line is composed, extended or left exactly once
 #   synthesize <new.md> <draft>       a new note holding the draft's bytes (draft: a file outside the
@@ -532,7 +534,7 @@ def cmd_selftest(_a):
 #   <spec>: comma-separated parts (P012), runs of parts (P011-P022) or line ranges (L1542-L1600),
 #   from `semantics.py segment`, in the order they are to appear.
 ARITY = {"mkdir": 1, "rmdir": 1, "trash": 1, "mv": 2, "append": 3,
-         "compose": 3, "extend": 3, "insert": 4, "leave": 2, "partition": 2, "synthesize": 3, "dedupe": 2}
+         "compose": 3, "extend": 3, "insert": 4, "leave": 2, "partition": 2, "pin": 2, "synthesize": 3, "dedupe": 2}
 
 def load_plan(path):
     ops = []
@@ -643,7 +645,7 @@ def simulate(vault, ops, before_rows):
     vacated = set()          # paths a mv or trash empties; a later MOVE onto one is refused (verifier blind spot, 2026-09-15);
                              # a compose/synthesize at a vacated path is fine: its bytes are expected by hash
     for n, op, args in ops:
-        paths = args[:2] if op in ("mv", "append", "dedupe") else [] if op in ("leave", "partition") \
+        paths = args[:2] if op in ("mv", "append", "dedupe") else [] if op in ("leave", "partition", "pin") \
             else [args[0], args[2]] if op == "insert" else args[:1]
         if any(is_frozen(p) for p in paths):
             errors.append(f"line {n}: touches the frozen register: {paths}"); continue
@@ -730,6 +732,11 @@ def simulate(vault, ops, before_rows):
             files[dst] = hashlib.sha256(data).hexdigest()
             origin[dst] = "(created) " + dst
             contained.update({origin[p]: [dst, off, ln] for p, (off, ln) in where.items()})
+        elif op == "pin":
+            if args[0] not in files:
+                errors.append(f"line {n}: pin names no note: {args[0]}"); continue
+            if hashlib.sha256(content(args[0])).hexdigest() != args[1]:
+                errors.append(f"line {n}: {args[0]} changed since the plan was made — its line anchors no longer hold; re-plan"); continue
         elif op in ("compose", "extend", "insert", "leave", "partition"):
             import semantics
             src = args[2] if op == "insert" else args[1] if op in ("compose", "extend") else args[0]
@@ -989,7 +996,7 @@ def apply_plan(vault, ops, before_rows, trash_fn, undo_path, frozen_live=False, 
                         shutil.copymode(J(dst), tmp)
                         os.replace(tmp, J(dst))
                         ok = sha256(J(dst)) == hashlib.sha256(new).hexdigest()
-                elif op in ("leave", "partition"):
+                elif op in ("leave", "partition", "pin"):
                     ok = True                                  # declarations, checked in the dry run
             except Exception as e:
                 return False, [f"line {n}: {op} failed: {e}"], expect

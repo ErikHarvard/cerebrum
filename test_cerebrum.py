@@ -1059,6 +1059,15 @@ try:
     check("both readers name the same section → the plan inserts after its last line",
           runs == [] and acts == [] and any(l.startswith(f"insert\t3 RESOURCES/Songs.md\tL{end_p0}\t") for l in plan)
           and C.simulate(v, write_plan(os.path.join(tmp20, "s.tsv"), plan), manifest(v))[0] == [])
+    check("… and the plan pins the destination's bytes before its insert", f"pin\t3 RESOURCES/Songs.md\t{C.sha256(songs)}" in plan
+          and plan.index(f"pin\t3 RESOURCES/Songs.md\t{C.sha256(songs)}") < next(i for i, l in enumerate(plan) if l.startswith("insert\t")))
+    # audit IV (2026-10-20): a plan queued while the keeper edits the destination landed its lines in the wrong place, GREEN
+    s_keep = open(songs, "rb").read()
+    open(songs, "wb").write(b"a line the keeper added at the top\n" + s_keep)
+    errs_pin = C.simulate(v, write_plan(os.path.join(tmp20, "s2.tsv"), plan), manifest(v))[0]
+    check("the destination edited after planning → the dry run refuses the plan, naming the note", any("changed since the plan was made" in e and "Songs.md" in e for e in errs_pin))
+    open(songs, "wb").write(s_keep)
+    check("a pin naming no note is refused", C.simulate(v, write_plan(os.path.join(tmp20, "s3.tsv"), ["pin\t3 RESOURCES/Nope.md\t" + "0" * 64]), manifest(v))[0] != [])
     b2 = dict(b, at="after P001")
     eB2 = SEM.effective(v, ocfg, base + [rec(v, "# INBOX/Two.md", "P000"), b2])[0]
     agreed2, runs2, acts2 = SEM.agree_detail(v, eA, eB2)

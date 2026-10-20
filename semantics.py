@@ -1084,6 +1084,8 @@ def propose(vault, cfg, agreed, runs, today=None):
             else:
                 plan.append(f"{'extend' if live or not first else 'compose'}\t{d}\t{dissolved[rel]}\t{_spec(ls)}")
             first = False
+        if inserts:                                 # the anchors are line numbers into these bytes: pinned, or a later edit moves them (audit IV)
+            plan.append(f"pin\t{d}\t{hashlib.sha256(read_bytes(vault, d)).hexdigest()}")
         for at, line in sorted(inserts, key=lambda x: -x[0]):   # later anchors first, so earlier lines keep their numbers
             plan.append(line.format(at))
         if len(contrib[d]) > 1:
