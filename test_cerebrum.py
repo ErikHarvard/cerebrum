@@ -1221,18 +1221,18 @@ try:
         # audit IV (2026-10-20): place took any vault note — a sensitive one was read to the model and auto-placed
         seen = []
         AR.llm = lambda messages, **k: seen.append(messages) or '{"lines": "*", "op": "keep", "dest": "3 RESOURCES/Songs.md", "subject": "s", "use": "u", "why": "w"}'
-        open(os.path.join(v, "# INBOX", "Secret.md"), "w", encoding="utf-8").write("the keeper's private words\n")
-        _acc = ocfg.setdefault("accepted", {}); _sens = list(_acc.get("sensitive", [])); _acc["sensitive"] = _sens + ["# INBOX/Secret.md"]
+        open(os.path.join(v, "# INBOX", "Private.md"), "w", encoding="utf-8").write("the keeper's private words\n")
+        _acc = ocfg.setdefault("accepted", {}); _sens = list(_acc.get("sensitive", [])); _acc["sensitive"] = _sens + ["# INBOX/Private.md"]
         try:
-            r_s = AR.place_note(v, ocfg, "# INBOX/Secret.md")
+            r_s = AR.place_note(v, ocfg, "# INBOX/Private.md")
             r_f = AR.place_note(v, ocfg, "3 RESOURCES/Songs.md")
             check("place refuses a note accepted as sensitive and a note outside the inbox — and the model never reads either",
                   r_s["status"] == "REFUSED" and r_f["status"] == "REFUSED" and "plan" not in r_s and "plan" not in r_f and seen == []
-                  and os.path.isfile(os.path.join(v, "# INBOX", "Secret.md")))
+                  and os.path.isfile(os.path.join(v, "# INBOX", "Private.md")))
             check("a reader may not name a sensitive note as its destination",
-                  "sensitive" in SEM.dest_problem("# INBOX/Secret.md", ocfg) and SEM.dest_problem("3 RESOURCES/Songs.md", ocfg) == "")
+                  "sensitive" in SEM.dest_problem("# INBOX/Private.md", ocfg) and SEM.dest_problem("3 RESOURCES/Songs.md", ocfg) == "")
         finally:
-            _acc["sensitive"] = _sens; os.remove(os.path.join(v, "# INBOX", "Secret.md"))
+            _acc["sensitive"] = _sens; os.remove(os.path.join(v, "# INBOX", "Private.md"))
         AR.llm = lambda messages, **k: "The verse says: tempo and hook [1]."
         mw = SEM.MIN_WORDS; SEM.MIN_WORDS = 5                     # the fixture's sections are short
         try:
@@ -1644,6 +1644,17 @@ try:
     check("a header followed by three blank lines, sent to a new note, composes nothing: all of it is LEFT",
           p32 == [] and not any(l.startswith("compose\t3 RESOURCES/Idea Stub.md") for l in plan32) and any(l.startswith("leave\t") and "L1-L6" in l for l in plan32))
     if any(l.startswith("compose") for l in plan32): print("      ", plan32)
+    # audit IV (2026-10-20): a capture placed WHOLE into an existing note carried its header into that note's body
+    FH = "# INBOX/Whole Capture.md"
+    open(os.path.join(v32, FH), "w", encoding="utf-8").write("---\ncaptured: 2026-10-20\nvia: the Archivist\n---\n\nthe tempo of the verse and the hook it returns to\n")
+    recs33 = [rec(v32, n) for n in SEM.scope(v32, cfg32) if n not in (FF, FH)] + [rec(v32, FF), rec(v32, FH, "*", dest="3 RESOURCES/Songs.md")]
+    eff33, _ = SEM.effective(v32, cfg32, recs33); ag33, ru33 = SEM.agree(v32, eff33, eff33)
+    plan33, _ = SEM.propose(v32, cfg32, ag33, ru33, today="2026-10-20")
+    joined = [l for l in plan33 if l.startswith(("insert\t3 RESOURCES/Songs.md", "extend\t3 RESOURCES/Songs.md"))]
+    check("a capture placed whole into an existing note leaves its header in the archived original; only the body joins",
+          joined and all(not l.split("\t")[-1].startswith(("L1-", "L1,")) and l.split("\t")[-1] != "L1" for l in joined)
+          and any(l.startswith("leave\t") and "L1-L5" in l for l in plan33))
+    if not joined or any(l.split("\t")[-1].startswith("L1") for l in joined): print("      ", plan33)
 finally:
     AR.QUEUE_DIR, AR.LOG, C.STATE = _rq, _rl, _rs31
     os.environ.pop("CEREBRUM_SNAPSHOTS", None); os.environ.pop("CEREBRUM_STATE", None)

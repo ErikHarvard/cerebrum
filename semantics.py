@@ -1022,7 +1022,11 @@ def propose(vault, cfg, agreed, runs, today=None):
                     place[rel][l] = LEAVE
         # a note that SPLITS never carries its frontmatter anywhere: the header describes the note it opened, not the
         # lines that leave it. Readers sent a capture's header alone into a new note (2026-09-15) — a stub of six lines.
-        if fm and len(set(place[rel].values())) > 1:
+        # The same for a whole note whose lines join an EXISTING note (audit IV, 2026-10-20: a capture's header landed mid-note,
+        # `via: the Archivist` then rendering as a heading); a whole note moved to a new path is a rename and keeps it.
+        ds = set(place[rel].values())
+        joins = len(ds) == 1 and next(iter(ds)) not in (rel, LEAVE) and os.path.isfile(os.path.join(vault, next(iter(ds))))
+        if fm and (len(ds) > 1 or joins):
             fm_dests = {place[rel][l] for l in fm if l in place[rel]}
             if fm_dests and fm_dests != {rel}:
                 tail, l = [], max(fm) + 1
