@@ -1292,6 +1292,12 @@ try:
         AR.llm = lambda messages, **k: "no json at all"
         r2 = AR.place_note(v, ocfg, rel2)
         check("a reader that returns no records is a PROBLEM, never a plan", r2["status"] == "PROBLEM" and "plan" not in r2)
+        AR.llm = lambda messages, **k: '{"lines": "*", "op": "keep", "dest": "# INBOX/Two.md", "subject": "s", "use": "u", "why": "w"}'
+        _, probs_ib, _ = AR.local_read(v, ocfg, rel2, {"notes": []}, {"trials": 4, "same_folder_top1": 2}, "A")
+        AR.llm = lambda messages, **k: '{"lines": "*", "op": "keep", "dest": "4 ARCHIVE/Old.md", "subject": "s", "use": "u", "why": "w"}'
+        _, probs_ar, _ = AR.local_read(v, ocfg, rel2, {"notes": []}, {"trials": 4, "same_folder_top1": 2}, "A")
+        check("a reader may not send a capture into another inbox note or the archive (audit IV)",
+              any("must be a home" in p for p in probs_ib) and any("must be a home" in p for p in probs_ar))
         # audit IV (2026-10-20): place took any vault note — a sensitive one was read to the model and auto-placed
         seen = []
         AR.llm = lambda messages, **k: seen.append(messages) or '{"lines": "*", "op": "keep", "dest": "3 RESOURCES/Songs.md", "subject": "s", "use": "u", "why": "w"}'
@@ -1573,10 +1579,11 @@ try:
     srv = _hs.ThreadingHTTPServer(("127.0.0.1", 0), AR.Handler); port = srv.server_address[1]
     AR.Handler.vault, AR.Handler.cfg, AR.Handler.port = vh, hcfg, port
     th = _th.Thread(target=srv.serve_forever, daemon=True); th.start()
-    def call(method, path, body=None, origin=None, ctype="application/json"):
+    def call(method, path, body=None, origin=None, ctype="application/json", host=None):
         c = _hc.HTTPConnection("127.0.0.1", port, timeout=10)
         hdr = {"Content-Type": ctype}
         if origin: hdr["Origin"] = origin
+        if host: hdr["Host"] = host
         c.request(method, path, body=body if isinstance(body, (bytes, type(None))) else json.dumps(body), headers=hdr)
         r = c.getresponse(); data = r.read(); c.close()
         return r.status, dict(r.getheaders()), data
@@ -1604,6 +1611,13 @@ try:
         check("ratify accepts only an intake plan the Archivist wrote, under its own sema dir", r1["ok"] is False and r2["ok"] is False and "not a plan" in r1["steps"][0][1])
         st, _, data = call("POST", "/api/capture", b"{not json")
         check("a malformed body is a 400, not a dropped connection", st == 400 and b"bad request" in data)
+        # audit IV (2026-10-20)
+        st, _, data = call("POST", "/api/capture", {"title": "Typed", "text": 5})
+        check("a number where text belongs is a 400 naming the field, not a 500", st == 400 and b"text" in data)
+        st_ok = call("GET", "/api/model")[0]; st_rb = call("GET", "/api/model", host=f"evil.example:{port}")[0]
+        st_rp = call("POST", "/api/capture", {"title": "Rebound", "text": "x"}, host=f"evil.example:{port}")[0]
+        check("a request whose Host is some other name (DNS rebinding) is refused; the Archivist's own host is served",
+              st_ok == 200 and st_rb == 403 and st_rp == 403 and not os.path.exists(os.path.join(vh, "# INBOX", "Rebound.md")))
     finally:
         srv.shutdown(); srv.server_close()
         AR.Handler.vault, AR.Handler.cfg, AR.Handler.port = _hv, _hcfg, _hp; AR.LOG = _real_log; C.STATE = _rs
@@ -1723,6 +1737,18 @@ try:
     st_a = []; AR._auto_undo(lambda *a: (0, "undo     : done\nundo     : not verified — the log names no before-manifest"), st_a, "u.tsv")
     st_b = []; AR._auto_undo(lambda *a: (0, "undo     : done\nundo     : verified — the vault equals the manifest"), st_b, "u.tsv")
     check("an auto-undo the verify did not confirm is never called undone", st_a[0][0] == "undo NOT done" and st_b[0][0] == "undone")
+    _qd, _oo, _rt = AR.QUEUE_DIR, AR._obsidian_open, AR.ratify
+    AR.QUEUE_DIR = tempfile.mkdtemp(prefix="cerebrum-q-"); AR._obsidian_open = lambda v: False
+    pq = os.path.join(tempfile.mkdtemp(prefix="cerebrum-qp-"), "intake-x.tsv"); open(pq, "w").write("mkdir\t3 RESOURCES/Q\n"); AR.enqueue(pq)
+    def _boom(*a, **k): raise IndexError("list index out of range")
+    AR.ratify = _boom
+    try:
+        out_q = AR.drain_queue(tmp27, {}); left = os.listdir(AR.QUEUE_DIR)
+    except Exception as e:
+        out_q, left = repr(e), ["crashed"]
+    finally:
+        AR.QUEUE_DIR, AR._obsidian_open, AR.ratify = _qd, _oo, _rt
+    check("a queued plan whose run crashes is withdrawn with its reason, never retried forever (audit IV)", left == [] and out_q and out_q[0][1] is False)
     check("one placement at a time: ratify holds a lock", isinstance(AR.RATIFY_LOCK, type(__import__("threading").Lock())))
     secs31 = [{"note": f"n{i}.md", "heading": "", "text": "plain words here"} for i in range(50)] + [{"note": "koinonia.md", "heading": "", "text": "KOINŌNIA and ΣΟΦΙΩΝ meet"}]
     o1 = AR._lexical_order("what is KOINŌNIA?", secs31); o2 = AR._lexical_order("ΣΟΦΙΩΝ", secs31); o3 = AR._lexical_order("nothing matches xyzzy", secs31)

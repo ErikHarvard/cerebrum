@@ -301,6 +301,10 @@ def local_read(vault, cfg, note, shortlist, cal, who, tries=3, url=None):
             probs = ["no JSON records in the answer"]
         else:
             _, probs = S.effective(vault, cfg, recs, notes=[note])
+            para = list(cfg.get("para", C.PARA))
+            if note.startswith(para[0] + "/"):           # a capture leaves the inbox for a home: never into another unsorted note, nor the archive (audit IV)
+                probs += [f"a capture's destination must be a home, not {para[0]} or {para[-1]}: {r['dest']}" for r in recs
+                          if (r.get("dest") or "").startswith((para[0] + "/", para[-1] + "/"))]
         if not probs:
             break
         refusal = "\n\nYour previous records were refused by the organ:\n" + "\n".join("- " + p for p in probs[:8]) + "\nWrite the corrected records, all of them, JSON lines only."
@@ -328,7 +332,9 @@ def place_note(vault, cfg, note, url=None, say=lambda *_: None):
         return {"status": "PROBLEM", "problems": ["the shortlist's control failed: " + p for p in probs]}
     calp = os.path.join(S.sema_dir(), "place-calibration.json")
     cal = json.load(open(calp)) if os.path.exists(calp) else S.place_calibrate(vault, cfg, cache_path=cache)
-    sl = S.place(vault, cfg, S.read_bytes(vault, note), cache_path=cache, exclude=[note])
+    inbox = list(cfg.get("para", C.PARA))[0]
+    others = [p for p in S.scope(vault, cfg) if p.startswith(inbox + "/")]      # unsorted notes are no home for a capture
+    sl = S.place(vault, cfg, S.read_bytes(vault, note), cache_path=cache, exclude=sorted(set(others) | {note}))
     say("shortlist ready")
     A, pA, tA = local_read(vault, cfg, note, sl, cal, "A", url=url); say("reader A done")
     B, pB, tB = local_read(vault, cfg, note, sl, cal, "B", url=url); say("reader B done")
@@ -412,7 +418,10 @@ def drain_queue(vault, cfg):
         if src and not os.path.isfile(os.path.join(vault, src)):     # the keeper removed or moved the note himself (2026-09-15)
             os.remove(qp); log(f"auto-place\twithdrawn {q}\tthe note is gone: {src} — the keeper's hand")
             out.append((plan, False)); continue
-        res = ratify(vault, cfg, plan, intake=True)
+        try:
+            res = ratify(vault, cfg, plan, intake=True)
+        except Exception as e:                       # a crash is withdrawn like a RED, never retried every 15 s (audit IV)
+            res = {"ok": False, "steps": [("ratify", f"crashed: {e!r}")]}
         if res.get("ok"):
             log(f"auto-place\tqueued {q}\tGREEN"); os.remove(qp)
         else:                                        # withdrawn with its reason on record; the note stays in the inbox for the keeper
@@ -718,6 +727,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         could write into the vault (found 2026-09-15). No Origin = not a browser (curl, a script) — the keeper's own shell."""
         o = self.headers.get("Origin")
         return o is None or o in self._own_origins()
+    def _host_ok(self):
+        """DNS rebinding: a page on some other name, re-pointed at 127.0.0.1, sends that name as Host — refused, so no
+        site can read the status or the log (audit IV, 2026-10-20)."""
+        h = self.headers.get("Host")
+        return h is None or h.lower() in {f"127.0.0.1:{self.port}", f"localhost:{self.port}"}
     def _cors(self):
         if self.headers.get("Origin") == PLUGIN_ORIGIN:
             self.send_header("Access-Control-Allow-Origin", PLUGIN_ORIGIN); self.send_header("Vary", "Origin")
@@ -736,6 +750,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             log(f"client gone\t{self.path}\tthe reply could not be sent")
     def log_message(self, *a): pass
     def do_GET(self):
+        if not self._host_ok():
+            return self._json({"error": "refused: not the Archivist's own host"}, 403)
         if self.path == "/api/model":                       # the switch's own state — no vault check, cheap enough to poll
             return self._json({"model": model_reachable(), "model_unit": model_unit_state()})
         if self.path == "/api/status":
@@ -750,6 +766,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                "model": model_reachable(), "model_unit": model_unit_state(), "obsidian": C._obsidian_running(), "log": tail})
         b = PAGE.encode(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def do_POST(self):
+        if not self._host_ok():
+            return self._json({"error": "refused: not the Archivist's own host"}, 403)
         if not self._origin_ok():
             return self._json({"error": "refused: this page is not the Archivist's own"}, 403)
         if not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
@@ -758,6 +776,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length", 0)); body = json.loads(self.rfile.read(n) or b"{}")
             if not isinstance(body, dict):
                 raise ValueError("body is not an object")
+            bad = [k for k in ("title", "text", "source", "note", "plan", "q") if body.get(k) is not None and not isinstance(body[k], str)]
+            if bad:                                           # a number where text belongs was a 500 (audit IV)
+                raise ValueError("these must be text: " + ", ".join(bad))
         except (ValueError, TypeError) as e:
             return self._json({"error": f"bad request: {e}"}, 400)
         try:
