@@ -1571,6 +1571,12 @@ try:
     ok4s, out4s, _ = C.take_snapshot(v4); os.remove(out4s)
     check("a vault holding a symlink snapshots OK — the link is archived as itself (audit IV: every snapshot was MISMATCH)", ok4s)
     os.remove(os.path.join(v4, "3 RESOURCES", "Linked.md"))
+    open(os.path.join(tmp27, "outside.md"), "w").write("not in the vault\n")
+    os.symlink(os.path.join(tmp27, "outside.md"), os.path.join(v4, "3 RESOURCES", "Abs.md"))
+    ok4o, out4o, lines4o = C.take_snapshot(v4); os.remove(out4o)
+    check("a symlink pointing outside the vault is not a backup of its bytes: MISMATCH, named (audit V)",
+          not ok4o and any("outside the vault" in l and "Abs.md" in l for l in lines4o))
+    os.remove(os.path.join(v4, "3 RESOURCES", "Abs.md"))
     os.mkfifo(os.path.join(v4, "3 RESOURCES", "dangling.md"))
     ok4, out4, lines4 = C.take_snapshot(v4)
     check("a snapshot that does not hold every listed file is MISMATCH, kept under a name the gate does not see",

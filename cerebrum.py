@@ -173,6 +173,10 @@ def take_snapshot(vault):
                     vanished.append(rel)
     with tarfile.open(out, "r:gz") as tar:
         names = {m.name[len("vault/"):] for m in tar.getmembers() if m.isfile() or m.issym()}   # a symlink is kept as itself (audit IV)
+    root = os.path.realpath(vault)
+    outside = [r for r in listed if os.path.islink(os.path.join(vault, r))       # a link whose target is not in the vault: the
+               and not os.path.realpath(os.path.join(vault, r)).startswith(root + os.sep)]   # archive holds the link, not its bytes (audit V)
+    names -= set(outside)
     movable = [r for r in listed if not is_frozen(r)]
     missing_movable = [r for r in movable if r not in names]
     ok = not missing_movable and len(names) == len(listed) - len(vanished)
@@ -182,6 +186,8 @@ def take_snapshot(vault):
     lines = [f"files listed={len(listed)}  in archive={len(names)}  "
              f"movable {len(movable) - len(missing_movable)}/{len(movable)}  "
              f"{'OK' if ok else 'MISMATCH — DO NOT PROCEED (archive kept as ' + os.path.basename(out) + ')'}"]
+    if outside:
+        lines.append(f"{len(outside)} symlink(s) point outside the vault — their bytes are not in the archive: " + "; ".join(outside[:5]))
     if vanished:
         lines.append(f"{len(vanished)} file(s) vanished while archiving"
                      + (" — all inside frozen (live) folders" if not missing_movable
