@@ -1305,6 +1305,16 @@ try:
         r = AR.place_note(v, ocfg, rel)
         check("place: shortlist → two readers → the destination read in a second round → PLAN with an insert after the named section",
               r["status"] == "PLAN" and any(l.startswith("insert\t3 RESOURCES/Songs.md\t") for l in r["plan"]) and os.path.isfile(r["plan_path"]))
+        rel5 = AR.capture(v, ocfg, "busy placement", f"{SUNO} another verse")
+        canned[rel5] = canned[rel].replace('"at": "after P000", ', '')
+        _qd5, _oo5, _rt5 = AR.QUEUE_DIR, AR._obsidian_open, AR.ratify
+        AR.QUEUE_DIR = tempfile.mkdtemp(prefix="cerebrum-q5-"); AR._obsidian_open = lambda v: False
+        AR.ratify = lambda *a, **k: {"ok": False, "busy": True, "steps": [("lock", C.BUSY)]}
+        try:
+            r5 = AR.place_note(v, ocfg, rel5); q5 = os.listdir(AR.QUEUE_DIR)
+        finally:
+            AR.QUEUE_DIR, AR._obsidian_open, AR.ratify = _qd5, _oo5, _rt5
+        check("an agreed placement that finds the vault busy is queued, not dropped (audit V)", r5["status"] == "PLAN" and r5.get("queued") and len(q5) == 1)
         AR.llm = lambda messages, **k: "no json at all"
         r2 = AR.place_note(v, ocfg, rel2)
         check("a reader that returns no records is a PROBLEM, never a plan", r2["status"] == "PROBLEM" and "plan" not in r2)
@@ -1391,6 +1401,17 @@ try:
         _tm.sleep(0.5); waited = not got and not any("during a run" in n for n in os.listdir(os.path.join(v, "# INBOX")))
         go.set(); t_c.join(5); t_h.join(5)
         check("a capture made while a run holds the vault waits for it, then lands", waited and got and os.path.isfile(os.path.join(v, got[0])))
+        _rw = AR.RUN_WAIT; AR.RUN_WAIT = 0.5
+        try:
+            with C.run_lock() as _lkc:                       # a run from another process (the shell) holds the vault
+                try:
+                    AR.capture(v, ocfg, "during a shell run", "words"); busy_c = False
+                except RuntimeError as e:
+                    busy_c = "another run" in str(e)
+        finally:
+            AR.RUN_WAIT = _rw
+        check("a capture during a shell run waits for its lock, and past the wait says busy and writes nothing (audit V)",
+              _lkc.held and busy_c and not any("during a shell run" in n for n in os.listdir(os.path.join(v, "# INBOX"))))
         check("the suite wrote nothing into the live Archivist log", AR.LOG != _real_log and os.path.isfile(AR.LOG))
     finally:
         AR.llm = real_llm; AR.CACHE_PATH = None; os.environ.pop("CEREBRUM_EMBED", None); importlib.reload(SEM); AR.S = SEM

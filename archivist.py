@@ -133,6 +133,7 @@ def polish(text, url=None):
     return body, ok
 
 # ---- capture: the keeper's click puts a note in the inbox ---------------------------------------
+RUN_WAIT = 600                      # seconds a capture waits for a run on the vault before it gives up and says so
 RATIFY_LOCK = threading.Lock()      # one run on the vault at a time: the page, a handler and the queue worker share the mover (2026-09-15); captures and polishes take it too (2026-10-20)
 def safe_title(title):
     t = re.sub(r"[\x00-\x1f\x7f]+", " ", title)                      # a newline in a filename breaks every manifest after it
@@ -148,7 +149,9 @@ def capture(vault, cfg, title, text, source="", do_polish=False, url=None):
         text, polished = polish(text, url=url)
     else:
         polished = False
-    with RATIFY_LOCK:                      # a capture written during a run made its manifest-then-move check go RED (audit IV)
+    with RATIFY_LOCK, C.run_lock(wait=RUN_WAIT) as lk:  # a capture written during a run made its manifest-then-move check go RED (audit IV);
+        if not lk.held:                                  # a shell run counts too (audit V)
+            raise RuntimeError(C.BUSY)
         return _capture(vault, cfg, title, text, source, do_polish, polished)
 
 def _capture(vault, cfg, title, text, source, do_polish, polished):
@@ -180,7 +183,9 @@ def polish_note(vault, cfg, rel, url=None):
     if "polished: by the Archivist" in head:
         return {"error": "already polished"}
     new_body, ok = polish(body.strip("\n"), url=url)
-    with RATIFY_LOCK:
+    with RATIFY_LOCK, C.run_lock(wait=RUN_WAIT) as lk:
+        if not lk.held:
+            return {"error": C.BUSY}
         if not os.path.isfile(p) or open(p, encoding="utf-8").read() != text:          # changed while the model read it: nothing is overwritten
             return {"error": "the note changed while it was being polished — polish it again"}
         return _write_polished(p, rel, head, new_body, ok)
@@ -377,7 +382,11 @@ def place_note(vault, cfg, note, url=None, say=lambda *_: None):
             log(f"auto-place\t{note}\tQUEUED until Obsidian closes\t{r.get('placed_into', '')}")
         else:
             r["placed"] = ratify(vault, cfg, r["plan_path"], intake=True)
-            log(f"auto-place\t{note}\t{'GREEN' if r['placed'].get('ok') else 'RED'}\t{r.get('placed_into', '')}")
+            if r["placed"].get("busy"):              # another run holds the vault: queued, not dropped (audit V)
+                enqueue(r["plan_path"]); r["queued"] = True
+                log(f"auto-place\t{note}\tbusy — QUEUED\t{r.get('placed_into', '')}")
+            else:
+                log(f"auto-place\t{note}\t{'GREEN' if r['placed'].get('ok') else 'RED'}\t{r.get('placed_into', '')}")
     return r
 
 def _plan_destination(plan_lines):

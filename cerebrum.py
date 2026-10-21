@@ -109,7 +109,10 @@ def _hash_all(vault):
 class run_lock:
     """One run on the vault at a time, across processes: the keeper's shell and the Archivist's service share it
     (audit IV, 2026-10-20 — RATIFY_LOCK was per process). The Archivist's own steps run with CEREBRUM_RUN_LOCKED=1:
-    the lock is already held for them. `held` is False when another run has it."""
+    the lock is already held for them. `held` is False when another run has it; with wait=N it waits up to N seconds
+    first (a capture waits for a shell run rather than landing in its middle — audit V)."""
+    def __init__(self, wait=0):
+        self.wait = wait
     def __enter__(self):
         import fcntl
         self.fh = None
@@ -117,11 +120,16 @@ class run_lock:
             self.held = True; return self
         ensure_dirs()
         self.fh = open(os.path.join(STATE, "run.lock"), "a")
-        try:
-            fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB); self.held = True
-        except BlockingIOError:
-            self.held = False
-        return self
+        deadline = time.time() + self.wait
+        while True:
+            try:
+                fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB); self.held = True
+                return self
+            except BlockingIOError:
+                if time.time() >= deadline:
+                    self.held = False
+                    return self
+                time.sleep(0.2)
     def __exit__(self, *exc):
         if self.fh:
             self.fh.close()                     # closing releases the lock
