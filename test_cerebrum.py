@@ -1095,6 +1095,22 @@ try:
     check("the destination edited after planning → the dry run refuses the plan, naming the note", any("changed since the plan was made" in e and "Songs.md" in e for e in errs_pin))
     open(songs, "wb").write(s_keep)
     check("a pin naming no note is refused", C.simulate(v, write_plan(os.path.join(tmp20, "s3.tsv"), ["pin\t3 RESOURCES/Nope.md\t" + "0" * 64]), manifest(v))[0] != [])
+    # audit V (2026-10-20): a pin emitted after an extend of the same note compared the extended bytes — a valid plan refused
+    vm = os.path.join(tmp20, "pinmix")
+    for pth, t in {"# INBOX/One.md": "# One\nsong idea one about a river\n", "# INBOX/Two.md": "# Two\nintro line\n\n## Verse\nsong idea two about a mountain\n",
+                   "3 RESOURCES/Songs.md": "# Songs\nfirst song\n\n## Later\nsecond song\n"}.items():
+        os.makedirs(os.path.dirname(os.path.join(vm, pth)), exist_ok=True); open(os.path.join(vm, pth), "w").write(t)
+    cfgm = {"para": list(C.PARA), "frozen": []}
+    def _rm(note, dest="", at=""):
+        return dict(rec(vm, note, dest=dest), at=at)
+    segm = SEM.segment(open(os.path.join(vm, "3 RESOURCES/Songs.md"), "rb").read())
+    recm = [_rm("3 RESOURCES/Songs.md"), _rm("# INBOX/One.md", dest="3 RESOURCES/Songs.md"), _rm("# INBOX/Two.md", dest="3 RESOURCES/Songs.md", at="after " + segm[0]["id"])]
+    em = SEM.effective(vm, cfgm, recm)[0]; agm, rum, _ = SEM.agree_detail(vm, em, SEM.effective(vm, cfgm, [dict(r) for r in recm])[0])
+    planm = SEM.propose(vm, cfgm, agm, rum, today="2026-01-01")[0]
+    errm = C.simulate(vm, write_plan(os.path.join(tmp20, "pm.tsv"), planm), C.manifest_rows(vm))[0]
+    check("two notes into one existing note — one appended, one inserted — the plan passes its own dry run",
+          errm == [] and any(l.startswith("extend\t") for l in planm) and any(l.startswith("insert\t") for l in planm) and any(l.startswith("pin\t") for l in planm))
+    if errm: print("      ", errm, planm)
     b2 = dict(b, at="after P001")
     eB2 = SEM.effective(v, ocfg, base + [rec(v, "# INBOX/Two.md", "P000"), b2])[0]
     agreed2, runs2, acts2 = SEM.agree_detail(v, eA, eB2)

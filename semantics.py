@@ -1071,7 +1071,7 @@ def propose(vault, cfg, agreed, runs, today=None):
         left = [l for l, d in place[rel].items() if d == LEAVE]
         if left:
             plan.append(f"leave\t{arc}\t{_spec(left)}")
-    gathered = {}
+    gathered, pins = {}, []
     for d in order:
         if d == LEAVE:
             continue
@@ -1088,8 +1088,8 @@ def propose(vault, cfg, agreed, runs, today=None):
             else:
                 plan.append(f"{'extend' if live or not first else 'compose'}\t{d}\t{dissolved[rel]}\t{_spec(ls)}")
             first = False
-        if inserts:                                 # the anchors are line numbers into these bytes: pinned, or a later edit moves them (audit IV)
-            plan.append(f"pin\t{d}\t{hashlib.sha256(read_bytes(vault, d)).hexdigest()}")
+        if inserts:                                 # the anchors are line numbers into these bytes: pinned, or a later edit moves them (audit IV);
+            pins.append(f"pin\t{d}\t{hashlib.sha256(read_bytes(vault, d)).hexdigest()}")   # at the plan's head, before any extend changes them
         for at, line in sorted(inserts, key=lambda x: -x[0]):   # later anchors first, so earlier lines keep their numbers
             plan.append(line.format(at))
         if len(contrib[d]) > 1:
@@ -1110,6 +1110,7 @@ def propose(vault, cfg, agreed, runs, today=None):
         if p.endswith(".md") and p not in dissolved and p not in moved:
             names[os.path.basename(p).lower()].add(p)
     clash = sorted(d for d in order if not exists(d) and names.get(os.path.basename(d).lower(), set()) - {d})
+    plan = pins + plan
     return plan, {"moved": moved, "split": {rel: sorted({d for d in place[rel].values()}) for rel in dissolved},
                   "gathered": gathered, "dedupe": dedupe, "acts": dict(acts), "blocked": sorted(blocked),
                   "disputes": runs, "acting": sorted(place), "name_clashes": clash,
