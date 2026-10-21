@@ -424,7 +424,10 @@ def drain_queue(vault, cfg):
         qp = os.path.join(QUEUE_DIR, q); plan = open(qp, encoding="utf-8").read().strip()
         if not os.path.isfile(plan):
             os.remove(qp); continue
-        src = _plan_source(plan)
+        try:
+            src = _plan_source(plan)
+        except OSError as e:                         # an unreadable plan is withdrawn like a crashed one (audit V)
+            os.remove(qp); log(f"auto-place\twithdrawn {q}\tunreadable plan: {e!r}"); out.append((plan, False)); continue
         if src and not os.path.isfile(os.path.join(vault, src)):     # the keeper removed or moved the note himself (2026-09-15)
             os.remove(qp); log(f"auto-place\twithdrawn {q}\tthe note is gone: {src} — the keeper's hand")
             out.append((plan, False)); continue
@@ -714,7 +717,7 @@ if(r.disputes)t+="\ndisputes: "+r.disputes.map(d=>`L${d.first}–L${d.last}`).jo
 $("ratify").innerHTML=r.status==="PLAN"?`<button class="primary" onclick="doRatify()">Ratify — run this plan on the vault</button> <span class="muted">snapshot · rehearsal · the mover · verify · the Acta</span>`:"";lastPlan=r.plan_path||"";}
 async function store(){if(!needModel("storeOut"))return;$("storeOut").textContent="capturing…";const c=await api("/api/capture",{title:$("title").value||$("text").value.trim().split(/\s+/).slice(0,8).join(" "),text:$("text").value,source:$("source").value,polish:$("polish").checked});if(c.error){$("storeOut").textContent="! "+c.error;return;}
 $("storeOut").textContent=`captured → ${c.note}\nreading (shortlist, two readers, the gate)… this takes a minute or two on the local model`;show(await api("/api/place",{note:c.note}));status();}
-async function polishExisting(){if(!needModel("storeOut"))return;const n=prompt("Inbox note path, e.g. # INBOX/Captured.md");if(!n)return;$("storeOut").textContent="polishing…";const r=await api("/api/polish",{note:n});$("storeOut").textContent=r.error?"! "+r.error:`polished ${r.note} (raw kept beneath) — now place it`;}
+async function polishExisting(){if(!needModel("storeOut"))return;const n=prompt("Inbox note path, e.g. # INBOX/Captured.md");if(!n)return;$("storeOut").textContent="polishing…";const r=await api("/api/polish",{note:n});$("storeOut").textContent=r.error?"! "+r.error:r.polished?`polished ${r.note} (raw kept beneath) — now place it`:`not polished: the model returned nothing usable — ${r.note} is unchanged`;}
 async function placeExisting(){if(!needModel("storeOut"))return;const n=prompt("Inbox note path, e.g. # INBOX/Something.md");if(!n)return;$("storeOut").textContent="reading…";show(await api("/api/place",{note:n}));}
 async function doRatify(){if(!lastPlan)return;$("ratify").innerHTML="running…";const r=await api("/api/ratify",{plan:lastPlan});$("ratify").innerHTML=`<span class="${r.ok?"ok":"bad"}">${r.ok?"GREEN — placed and verified":"REFUSED / RED"}</span><pre>${r.steps.map(s=>s.join(": ")).join("\n")}${r.detail?"\n"+r.detail:""}</pre>`;status();}
 async function askQ(){if(!needModel("askOut"))return;$("askOut").textContent="retrieving and answering…";const r=await api("/api/ask",{q:$("q").value});lastMd=r.markdown||"";$("askOut").textContent=(r.markdown||("! "+r.error))+(r.path?`\n\n(saved: ${r.path})`:"");}

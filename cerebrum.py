@@ -1358,7 +1358,7 @@ def cmd_pass(_a):
     v = checks.Vault(VAULT, CFG)
     links = [r for r in checks.RULES if r.name == "every link names one note"][0].fn(v)
     broken, ambiguous = [l for l in links if "names nothing" in l], [l for l in links if "could be" in l]
-    mans = sorted(glob.glob(os.path.join(STATE, "manifest-*.tsv")))
+    mans = sorted(glob.glob(os.path.join(STATE, "manifest-*.tsv")), key=os.path.getmtime)   # by time: `X-2.tsv` sorts before `X.tsv` by name
     loss = loss_since(VAULT, mans[-1], is_frozen) if mans else []
     stale = CFG.get("registry") and not registry.fresh(VAULT, CFG)
     print(f"counts   : inbox depth {len(inbox)} · broken links {len(broken)} · ambiguous {len(ambiguous)} · "
