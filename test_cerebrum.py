@@ -1325,6 +1325,12 @@ try:
             check("place refuses a note accepted as sensitive and a note outside the inbox — and the model never reads either",
                   r_s["status"] == "REFUSED" and r_f["status"] == "REFUSED" and "plan" not in r_s and "plan" not in r_f and seen == []
                   and os.path.isfile(os.path.join(v, "# INBOX", "Private.md")))
+            os.symlink("Private.md", os.path.join(v, "# INBOX", "Alias.md"))
+            r_sp = [AR.place_note(v, ocfg, n)["status"] for n in ("# INBOX/./Private.md", "# INBOX//Private.md", "# INBOX/Alias.md")]
+            r_hv = [AR.vault_rel(v, n) for n in ("# INBOX/./Private.md", "# INBOX//Private.md", "# INBOX/Alias.md")]
+            os.remove(os.path.join(v, "# INBOX", "Alias.md"))
+            check("no other spelling of a sensitive note reaches the model: ./, // and a symlink are refused, and the handler canonicalises them (audit V)",
+                  r_sp == ["REFUSED"] * 3 and seen == [] and r_hv == ["# INBOX/Private.md"] * 3)
             check("a reader may not name a sensitive note as its destination",
                   "sensitive" in SEM.dest_problem("# INBOX/Private.md", ocfg) and SEM.dest_problem("3 RESOURCES/Songs.md", ocfg) == "")
         finally:

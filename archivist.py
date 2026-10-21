@@ -322,7 +322,8 @@ def place_problem(cfg, note):
     return f"a note in the frozen register: {note}" if C.is_frozen(note) else ""
 
 def place_note(vault, cfg, note, url=None, say=lambda *_: None):
-    pp = place_problem(cfg, note)
+    canon = vault_rel(vault, note)
+    pp = place_problem(cfg, note) or ("" if canon == note else f"only a note by its own path in the vault: {note}")
     if pp:
         log(f"place\t{note}\tREFUSED\t{pp}")
         return {"status": "REFUSED", "problems": [pp]}
@@ -715,11 +716,13 @@ _status_cache = {"when": 0.0, "ok": None}
 PLUGIN_ORIGIN = "app://obsidian.md"      # the Obsidian plugin (Electron) — the one cross-origin caller allowed
 
 def vault_rel(vault, note):
-    """A note path as the vault knows it, or None: relative, inside the vault after resolving, never `..`."""
+    """A note path as the vault knows it, or None: relative, inside the vault after resolving, never `..`. The path
+    returned is the canonical one — `./`, `//` and symlinks resolved — so no spelling slips past a check made on
+    names (audit V, 2026-10-20: `# INBOX/./Passwords.md` was read to the model)."""
     if not note or os.path.isabs(note) or ".." in note.split("/") or "\\" in note:
         return None
     root = os.path.realpath(vault); full = os.path.realpath(os.path.join(vault, note))
-    return note if full.startswith(root + os.sep) else None
+    return os.path.relpath(full, root) if full.startswith(root + os.sep) else None
 
 class Handler(http.server.BaseHTTPRequestHandler):
     vault, cfg = C.VAULT, C.CFG
